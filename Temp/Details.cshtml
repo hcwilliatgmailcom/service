@@ -1,0 +1,170 @@
+@inherits Microsoft.VisualStudio.Web.CodeGeneration.Templating.RazorTemplateBase
+@using Microsoft.VisualStudio.Web.CodeGeneration.EntityFrameworkCore
+@using System.Collections.Generic
+@using System.Linq
+@@model @Model.ViewDataTypeName
+
+@{
+    if (Model.IsPartialView)
+    {
+    }
+    else if (Model.IsLayoutPageSelected)
+    {
+@:@@{
+    @:ViewData["Title"] = "@Model.ViewName";
+        if (!string.IsNullOrEmpty(Model.LayoutPageFile))
+        {
+    @:Layout = "@Model.LayoutPageFile";
+        }
+@:}
+@:
+@:
+    }
+    else
+    {
+@:@@{
+    @:Layout = null;
+@:}
+@:
+@:<!DOCTYPE html>
+@:
+@:<html>
+@:<head>
+    @:<meta name="viewport" content="width=device-width" />
+    @:<title>@Model.ViewName</title>
+@:</head>
+@:<body>
+@:
+        //    PushIndent("    ");
+    }
+}
+<div>
+    <dl class="row">
+@{
+    Dictionary<string, IPropertyMetadata> propertyLookup = ((IModelMetadata)Model.ModelMetadata).Properties.ToDictionary(x => x.PropertyName, x => x);
+    Dictionary<string, INavigationMetadata> navigationLookup = ((IModelMetadata)Model.ModelMetadata).Navigations.ToDictionary(x => x.AssociationPropertyName, x => x);
+
+    var navDisplayMembers = new Dictionary<string, string>();
+    foreach (var nav in ((IModelMetadata)Model.ModelMetadata).Navigations)
+    {
+        string displayMember = nav.DisplayPropertyName;
+        var navPropInfo = Model.ModelMetadata.ModelType.GetProperty(nav.AssociationPropertyName);
+        if (navPropInfo != null)
+        {
+            var nameProp = navPropInfo.PropertyType.GetProperty("Name");
+            if (nameProp != null && nameProp.PropertyType == typeof(string))
+            {
+                displayMember = "Name";
+            }
+            else
+            {
+                foreach (var p in navPropInfo.PropertyType.GetProperties())
+                {
+                    if (p.PropertyType == typeof(string))
+                    {
+                        displayMember = p.Name;
+                        break;
+                    }
+                }
+            }
+        }
+        navDisplayMembers[nav.AssociationPropertyName] = displayMember;
+    }
+
+    foreach (var item in Model.ModelMetadata.ModelType.GetProperties())
+    {
+        if (propertyLookup.TryGetValue(item.Name, out IPropertyMetadata property)
+            && property.Scaffold && !property.IsForeignKey && !property.IsPrimaryKey)
+        {
+        <dt class = "col-sm-2">
+            @@Html.DisplayNameFor(model => model.@GetValueExpression(property))
+        </dt>
+        <dd class = "col-sm-10">
+            @@Html.DisplayFor(model => model.@GetValueExpression(property))
+        </dd>
+        }
+        else if (navigationLookup.TryGetValue(item.Name, out INavigationMetadata navigation))
+        {
+            var navDisplay = navDisplayMembers[navigation.AssociationPropertyName];
+            var navTypeName = Model.ModelMetadata.ModelType.GetProperty(navigation.AssociationPropertyName).PropertyType.Name;
+            var navFkName = navigation.ForeignKeyPropertyNames[0];
+        @:<dt class = "col-sm-2 fw-bold">
+            @:@@Html.DisplayNameFor(model => model.@GetValueExpression(navigation))
+        @:</dt>
+        @:<dd class = "col-sm-10">
+            @:@@Model.@(GetValueExpression(navigation))?.@(navDisplay)
+            @:<a asp-controller="@navTypeName" asp-action="Index" target="_blank" class="ms-2 badge bg-secondary text-decoration-none">List</a>
+            @:<a asp-controller="@navTypeName" asp-action="Details" asp-route-id="@@Model?.@(navFkName)" target="_blank" class="badge bg-info text-decoration-none">Show</a>
+            @:<a asp-controller="@navTypeName" asp-action="Create" target="_blank" class="badge bg-success text-decoration-none">New</a>
+        @:</dd>
+        }
+    }
+}    </dl>
+</div>
+<div>
+@{
+    string pkName = GetPrimaryKeyName();
+    if (pkName != null)
+    {
+    @:<a asp-action="Edit" asp-route-id="@@Model?.@pkName">Edit</a> |
+    @:<a asp-action="Delete" asp-route-id="@@Model?.@pkName">Delete</a> |
+    @:<a asp-action="Index">Back to List</a>
+    }
+    else
+    {
+    @:@@Html.ActionLink("Edit", "Edit", new { /* id = Model.PrimaryKey */ }) |
+    @:@@Html.ActionLink("Delete", "Delete", new { /* id = Model.PrimaryKey */ }) |
+    @:<a asp-action="Index">Back to List</a>
+    }
+}</div>
+@{
+@:<hr />
+@:<h5>History</h5>
+@:@@if (ViewBag.History != null && ((IEnumerable<dynamic>)ViewBag.History).Any())
+@:{
+@:<table class="table table-sm table-striped">
+    @:<thead><tr><th>When</th><th>User</th><th>Column</th><th>From</th><th>To</th></tr></thead>
+    @:<tbody>
+    @:@@foreach (var h in ViewBag.History)
+    @:{
+        @:<tr>
+            @:<td>@@h.Changedat?.ToString("dd.MM.yyyy HH:mm:ss")</td>
+            @:<td>@@h.Username</td>
+            @:<td>@@h.Columnname</td>
+            @:<td>@@h.Oldvalue</td>
+            @:<td>@@h.Newvalue</td>
+        @:</tr>
+    @:}
+    @:</tbody>
+@:</table>
+@:}
+@:else
+@:{
+@:<p class="text-muted">No history available.</p>
+@:}
+    if (!Model.IsPartialView && !Model.IsLayoutPageSelected)
+    {
+        //ClearIndent();
+@:</body>
+@:</html>
+    }
+}
+@functions
+{
+    string GetPrimaryKeyName()
+    {
+        return (Model.ModelMetadata.PrimaryKeys != null && Model.ModelMetadata.PrimaryKeys.Length == 1)
+        ? Model.ModelMetadata.PrimaryKeys[0].PropertyName
+        : null;
+    }
+
+    string GetValueExpression(IPropertyMetadata property)
+    {
+        return property.PropertyName;
+    }
+
+    string GetValueExpression(INavigationMetadata navigation)
+    {
+        return navigation.AssociationPropertyName;
+    }
+}

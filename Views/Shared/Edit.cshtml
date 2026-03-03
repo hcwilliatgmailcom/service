@@ -1,0 +1,121 @@
+@model dynamic
+@{
+    ViewData["Title"] = "Edit " + (string)ViewData["EntityDisplayName"]!;
+    var properties = (List<Dictionary<string, object>>)ViewData["Properties"]!;
+    var foreignKeys = (Dictionary<string, Dictionary<string, string>>)ViewData["ForeignKeys"]!;
+    var controllerName = (string)ViewData["ControllerName"]!;
+    var primaryKeys = (List<string>)ViewData["PrimaryKeys"]!;
+    var routeKeys = (List<string>)ViewData["RouteKeys"]!;
+
+    var modelObj = (object)Model;
+    var modelType = modelObj.GetType();
+}
+
+<h1>Edit @ViewData["EntityDisplayName"]</h1>
+
+<h4>@ViewData["EntityDisplayName"]</h4>
+<hr />
+<div class="row">
+    <div class="col-md-4">
+        <form asp-action="Edit" asp-controller="@controllerName" method="post">
+            <div asp-validation-summary="ModelOnly" class="text-danger"></div>
+            @foreach (var pk in primaryKeys)
+            {
+                var pkValue = modelType.GetProperty(pk)?.GetValue(modelObj);
+                <input type="hidden" name="@pk" value="@pkValue" />
+            }
+            @foreach (var prop in properties)
+            {
+                var name = (string)prop["Name"];
+                var typeName = (string)prop["Type"];
+                var isPK = (bool)prop["IsPK"];
+                var isFK = (bool)prop["IsFK"];
+                var currentValue = modelType.GetProperty(name)?.GetValue(modelObj);
+
+                if (isPK) continue;
+
+                if (isFK && foreignKeys.ContainsKey(name))
+                {
+                    var fk = foreignKeys[name];
+                    var selectList = ViewData[name] as Microsoft.AspNetCore.Mvc.Rendering.SelectList;
+                    var listId = $"list_{name}";
+                    var selectedText = selectList?.SelectedValue != null
+                        ? selectList.FirstOrDefault(i => i.Value == selectList.SelectedValue.ToString())?.Text ?? ""
+                        : "";
+                    <div class="form-group mb-3">
+                        <label class="control-label">@fk["NavigationProperty"]</label>
+                        <input type="hidden" name="@name" id="@name" value="@currentValue" />
+                        <input type="text" class="form-control fk-autocomplete"
+                               id="display_@name" list="@listId"
+                               value="@selectedText"
+                               data-target="@name"
+                               autocomplete="off" />
+                        <datalist id="@listId">
+                            @if (selectList != null)
+                            {
+                                @foreach (var item in selectList)
+                                {
+                                    <option value="@item.Text" data-id="@item.Value"></option>
+                                }
+                            }
+                        </datalist>
+                        <span class="text-danger" data-valmsg-for="@name" data-valmsg-replace="true"></span>
+                    </div>
+                }
+                else
+                {
+                    var inputType = "text";
+                    var step = "";
+                    if (typeName == "int" || typeName == "Int32" || typeName == "Nullable<int>")
+                    {
+                        inputType = "number";
+                    }
+                    else if (typeName == "decimal" || typeName == "Decimal" || typeName == "Nullable<decimal>")
+                    {
+                        inputType = "number";
+                        step = "0.01";
+                    }
+                    else if (typeName == "DateOnly" || typeName == "Nullable<DateOnly>" || typeName == "DateOnly?")
+                    {
+                        inputType = "date";
+                    }
+
+                    var displayValue = currentValue;
+                    if (inputType == "date" && currentValue != null)
+                    {
+                        displayValue = ((DateOnly)currentValue).ToString("yyyy-MM-dd");
+                    }
+
+                    <div class="form-group mb-3">
+                        <label class="control-label" for="@name">@name</label>
+                        <input name="@name" class="form-control" type="@inputType"
+                               value="@displayValue"
+                               @(step != "" ? $"step=\"{step}\"" : "") />
+                        <span class="text-danger" data-valmsg-for="@name" data-valmsg-replace="true"></span>
+                    </div>
+                }
+            }
+            <div class="form-group">
+                <input type="submit" value="Save" class="btn btn-primary" />
+            </div>
+        </form>
+    </div>
+</div>
+
+<div>
+    <a asp-action="Index" asp-controller="@controllerName">Back to List</a>
+</div>
+
+@section Scripts {
+    <partial name="_ValidationScriptsPartial" />
+    <script>
+        document.querySelectorAll('.fk-autocomplete').forEach(function (input) {
+            input.addEventListener('input', function () {
+                var target = document.getElementById(this.dataset.target);
+                var list = document.getElementById(this.getAttribute('list'));
+                var option = list.querySelector('option[value="' + CSS.escape(this.value) + '"]');
+                target.value = option ? option.dataset.id : '';
+            });
+        });
+    </script>
+}

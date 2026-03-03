@@ -1,0 +1,55 @@
+@model dynamic
+@{
+    ViewData["Title"] = "Details - " + (string)ViewData["EntityDisplayName"]!;
+    var properties = (List<Dictionary<string, object>>)ViewData["Properties"]!;
+    var foreignKeys = (Dictionary<string, Dictionary<string, string>>)ViewData["ForeignKeys"]!;
+    var controllerName = (string)ViewData["ControllerName"]!;
+    var primaryKeys = (List<string>)ViewData["PrimaryKeys"]!;
+    var routeKeys = (List<string>)ViewData["RouteKeys"]!;
+
+    var modelObj = (object)Model;
+    var modelType = modelObj.GetType();
+}
+
+<h1>@ViewData["EntityDisplayName"] Details</h1>
+
+<div>
+    <h4>@ViewData["EntityDisplayName"]</h4>
+    <hr />
+    <dl class="row">
+        @foreach (var prop in properties)
+        {
+            var name = (string)prop["Name"];
+            var isPK = (bool)prop["IsPK"];
+            var isFK = (bool)prop["IsFK"];
+
+            if (isFK && foreignKeys.ContainsKey(name))
+            {
+                var fk = foreignKeys[name];
+                var navPropInfo = modelType.GetProperty(fk["NavigationProperty"]);
+                var navObj = navPropInfo?.GetValue(modelObj);
+                var displayValue = navObj?.GetType().GetProperty(fk["DisplayMember"])?.GetValue(navObj);
+                <dt class="col-sm-2">@fk["NavigationProperty"]</dt>
+                <dd class="col-sm-10">@displayValue</dd>
+            }
+            else
+            {
+                var value = modelType.GetProperty(name)?.GetValue(modelObj);
+                <dt class="col-sm-2">@name</dt>
+                <dd class="col-sm-10">@value</dd>
+            }
+        }
+    </dl>
+</div>
+
+<div>
+    @{
+        var rv = new Dictionary<string, string>();
+        for (int i = 0; i < primaryKeys.Count; i++)
+        {
+            rv[routeKeys[i]] = modelType.GetProperty(primaryKeys[i])?.GetValue(modelObj)?.ToString() ?? "";
+        }
+    }
+    <a asp-action="Edit" asp-controller="@controllerName" asp-all-route-data="@rv">Edit</a> |
+    <a asp-action="Index" asp-controller="@controllerName">Back to List</a>
+</div>
