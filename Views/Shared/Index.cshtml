@@ -14,12 +14,16 @@
     <input type="hidden" name="sortOrder" value="@ViewData["CurrentSort"]" />
     <div class="input-group">
         <input type="text" name="searchString" value="@ViewData["CurrentFilter"]" class="form-control" placeholder="Search..." />
-        <a asp-action="Create" asp-controller="@controllerName" class="btn btn-danger">Create</a>
-        <button type="submit" class="btn btn-primary">Search</button>
+        <button type="submit" class="btn btn-primary me-2">
+            <i class="bi bi-search me-1"></i>Search
+        </button>
         @if (!string.IsNullOrEmpty((string?)ViewData["CurrentFilter"]))
         {
-            <a asp-action="Index" asp-controller="@controllerName" class="btn btn-outline-secondary">Clear</a>
+            <a asp-action="Index" asp-controller="@controllerName" class="btn btn-outline-secondary me-2">Clear</a>
         }
+        <a asp-action="Create" asp-controller="@controllerName" class="btn btn-danger me-2">
+            <i class="bi bi-plus-circle me-1"></i>Create
+        </a>
     </div>
 </form>
 

@@ -1,3 +1,4 @@
+using System.Data;
 using System.Globalization;
 using System.Linq.Dynamic.Core;
 using Microsoft.AspNetCore.Mvc;
@@ -6,6 +7,7 @@ using Microsoft.AspNetCore.Mvc.Rendering;
 using Microsoft.EntityFrameworkCore;
 using MiniExcelLibs;
 using service.Data;
+using service.Models;
 using service.Services;
 
 namespace service.Controllers;
@@ -155,31 +157,27 @@ public class CrudController<T> : Controller where T : class
 
     [HttpPost]
     [ValidateAntiForgeryToken]
-    public async Task<IActionResult> Create(T? _placeholder_)
+    public async Task<IActionResult> Create([BindNever] T? _placeholder_)
     {
         var entity = Activator.CreateInstance<T>();
         var bindableSet = new HashSet<string>(
             Meta.Properties.Select(p => p.Name));
 
-        // Remove nav property validations
-        foreach (var nav in Meta.NavigationIncludes)
-            ModelState.Remove(nav);
+        await TryUpdateModelAsync(entity, "",
+                p => p.Name != null && bindableSet.Contains(p.Name));
+        RemoveNavigationModelStateErrors();
 
-        if (await TryUpdateModelAsync(entity, "",
-                p => p.Name != null && bindableSet.Contains(p.Name)))
+        if (ModelState.IsValid)
         {
-            if (ModelState.IsValid)
+            try
             {
-                try
-                {
-                    _context.Add(entity);
-                    await _context.SaveChangesAsync();
-                    return RedirectToAction(nameof(Index));
-                }
-                catch (DbUpdateException ex)
-                {
-                    ModelState.AddModelError("", ex.InnerException?.Message ?? ex.Message);
-                }
+                _context.Add(entity);
+                await _context.SaveChangesAsync();
+                return RedirectToAction(nameof(Index));
+            }
+            catch (DbUpdateException ex)
+            {
+                ModelState.AddModelError("", ex.InnerException?.Message ?? ex.Message);
             }
         }
 
@@ -199,6 +197,7 @@ public class CrudController<T> : Controller where T : class
         var entity = await FindEntityAsync(keyValues);
         if (entity == null) return NotFound();
 
+        ViewData["AuditHistory"] = await LoadAuditHistoryAsync(entity);
         PopulateFKSelectLists(entity);
         SetViewMetadata();
         return View(entity);
@@ -209,7 +208,7 @@ public class CrudController<T> : Controller where T : class
     public async Task<IActionResult> Edit(
         int? id, int? serverId, int? applicationId, int? contactId,
         int? departmentId, int? networkId, int? databaseInstanceId,
-        T? _placeholder_)
+        [BindNever] T? _placeholder_)
     {
         var keyValues = GetRouteKeyValues(id, serverId, applicationId, contactId, departmentId, networkId, databaseInstanceId);
         if (keyValues == null) return NotFound();
@@ -220,31 +219,27 @@ public class CrudController<T> : Controller where T : class
         var bindableSet = new HashSet<string>(
             Meta.Properties.Select(p => p.Name));
 
-        // Remove nav property validations
-        foreach (var nav in Meta.NavigationIncludes)
-            ModelState.Remove(nav);
+        await TryUpdateModelAsync(entity, "",
+                p => p.Name != null && bindableSet.Contains(p.Name));
+        RemoveNavigationModelStateErrors();
 
-        if (await TryUpdateModelAsync(entity, "",
-                p => p.Name != null && bindableSet.Contains(p.Name)))
+        if (ModelState.IsValid)
         {
-            if (ModelState.IsValid)
+            try
             {
-                try
-                {
-                    _context.Update(entity);
-                    await _context.SaveChangesAsync();
-                    return RedirectToAction(nameof(Index));
-                }
-                catch (DbUpdateConcurrencyException)
-                {
-                    var exists = await FindByPKAsync(keyValues) != null;
-                    if (!exists) return NotFound();
-                    throw;
-                }
-                catch (DbUpdateException ex)
-                {
-                    ModelState.AddModelError("", ex.InnerException?.Message ?? ex.Message);
-                }
+                _context.Update(entity);
+                await _context.SaveChangesAsync();
+                return RedirectToAction(nameof(Index));
+            }
+            catch (DbUpdateConcurrencyException)
+            {
+                var exists = await FindByPKAsync(keyValues) != null;
+                if (!exists) return NotFound();
+                throw;
+            }
+            catch (DbUpdateException ex)
+            {
+                ModelState.AddModelError("", ex.InnerException?.Message ?? ex.Message);
             }
         }
 
@@ -508,6 +503,21 @@ public class CrudController<T> : Controller where T : class
 
     // --- Helper methods ---
 
+    private void RemoveNavigationModelStateErrors()
+    {
+        var navNames = _context.Model.FindEntityType(typeof(T))!
+            .GetNavigations()
+            .Select(n => n.Name)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var key in ModelState.Keys
+            .Where(k => navNames.Contains(k.Split('.')[0]))
+            .ToList())
+        {
+            ModelState.Remove(key);
+        }
+    }
+
     private static object? ConvertValue(object? raw, Type targetType)
     {
         var underlying = Nullable.GetUnderlyingType(targetType);
@@ -563,6 +573,7 @@ public class CrudController<T> : Controller where T : class
         if (value is int i) return i == 0;
         if (value is long l) return l == 0;
         if (value is short s) return s == 0;
+        if (value is decimal d) return d == 0;
         return false;
     }
 
@@ -597,7 +608,11 @@ public class CrudController<T> : Controller where T : class
 
     private async Task<T?> FindByPKAsync(object[] keyValues)
     {
-        return await _context.Set<T>().FindAsync(keyValues);
+        var pk = _context.Model.FindEntityType(typeof(T))!.FindPrimaryKey()!;
+        var typed = pk.Properties
+            .Select((p, i) => Convert.ChangeType(keyValues[i], p.ClrType, CultureInfo.InvariantCulture))
+            .ToArray();
+        return await _context.Set<T>().FindAsync(typed);
     }
 
     private async Task<T?> FindEntityAsync(object[] keyValues)
@@ -666,6 +681,56 @@ public class CrudController<T> : Controller where T : class
                 typeof(T).GetProperty(fkMeta.NavigationPropertyName)?.SetValue(entity, related);
             }
         }
+    }
+
+    private async Task<List<AuditHistoryEntry>> LoadAuditHistoryAsync(T entity)
+    {
+        var et       = _context.Model.FindEntityType(typeof(T))!;
+        var schema   = et.GetSchema() ?? "CMDB";
+        var table    = et.GetTableName() ?? typeof(T).Name;
+        var fullName = $"{schema}.{table}";
+
+        var pk       = et.FindPrimaryKey()!;
+        var entityId = string.Join(",", pk.Properties
+            .Select(p => typeof(T).GetProperty(p.Name)?.GetValue(entity)?.ToString()));
+
+        var results = new List<AuditHistoryEntry>();
+        try
+        {
+            var conn = _context.Database.GetDbConnection();
+            if (conn.State != ConnectionState.Open)
+                await conn.OpenAsync();
+
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText =
+                "SELECT CHANGEDAT, CHANGETYPE, PROPERTYNAME, OLDVALUE, NEWVALUE, CHANGEDBY " +
+                "FROM CMDB.AUDITHISTORY " +
+                "WHERE TABLENAME = :p0 AND ENTITYID = :p1 " +
+                "ORDER BY CHANGEDAT DESC";
+
+            var p0 = cmd.CreateParameter(); p0.ParameterName = "p0"; p0.Value = fullName;
+            var p1 = cmd.CreateParameter(); p1.ParameterName = "p1"; p1.Value = entityId;
+            cmd.Parameters.Add(p0);
+            cmd.Parameters.Add(p1);
+
+            using var reader = await cmd.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+            {
+                results.Add(new AuditHistoryEntry(
+                    ChangedAt:    Convert.ToDateTime(reader[0]),
+                    ChangeType:   reader.IsDBNull(1) ? null : reader.GetString(1),
+                    PropertyName: reader.IsDBNull(2) ? null : reader.GetString(2),
+                    OldValue:     reader.IsDBNull(3) ? null : reader.GetString(3),
+                    NewValue:     reader.IsDBNull(4) ? null : reader.GetString(4),
+                    ChangedBy:    reader.IsDBNull(5) ? null : reader.GetString(5)
+                ));
+            }
+        }
+        catch
+        {
+            // Table may not exist yet on first run — return empty list
+        }
+        return results;
     }
 
     private bool IsCollectionNavigation(string propertyName)

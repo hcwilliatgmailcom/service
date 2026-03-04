@@ -304,3 +304,4 @@ C:\service\bin\build-test\runtimes\win\lib\net8.0\System.Diagnostics.Performance
 C:\service\bin\build-test\runtimes\linux\lib\net8.0\System.DirectoryServices.Protocols.dll
 C:\service\bin\build-test\runtimes\osx\lib\net8.0\System.DirectoryServices.Protocols.dll
 C:\service\bin\build-test\runtimes\win\lib\net8.0\System.DirectoryServices.Protocols.dll
+C:\service\obj\Debug\net10.0\service.sourcelink.json

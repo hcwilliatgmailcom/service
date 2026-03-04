@@ -33,8 +33,8 @@ public class RestApiSyncService : BackgroundService
     private async Task RunSyncAsync(CancellationToken ct)
     {
         _logger.LogInformation("REST API sync starting...");
-        await _countrySyncService.SyncAsync(ct);
-        await _holidaySyncService.SyncAsync(ct);
+        //await _countrySyncService.SyncAsync(ct);
+        //await _holidaySyncService.SyncAsync(ct);
         _logger.LogInformation("REST API sync completed.");
     }
 }

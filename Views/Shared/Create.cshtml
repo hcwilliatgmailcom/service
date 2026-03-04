@@ -88,11 +88,35 @@
     <partial name="_ValidationScriptsPartial" />
     <script>
         document.querySelectorAll('.fk-autocomplete').forEach(function (input) {
-            input.addEventListener('input', function () {
-                var target = document.getElementById(this.dataset.target);
-                var list = document.getElementById(this.getAttribute('list'));
-                var option = list.querySelector('option[value="' + CSS.escape(this.value) + '"]');
-                target.value = option ? option.dataset.id : '';
+            var target = document.getElementById(input.dataset.target);
+            var list   = document.getElementById(input.getAttribute('list'));
+            var lastConfirmedText = input.value;
+
+            function syncId() {
+                var option = list.querySelector('option[value="' + CSS.escape(input.value) + '"]');
+                if (option) {
+                    target.value = option.dataset.id;
+                    lastConfirmedText = input.value;
+                } else {
+                    target.value = '';
+                }
+            }
+
+            input.addEventListener('input',  syncId);
+            input.addEventListener('change', syncId);
+
+            // Clear field on click so the datalist shows all options.
+            // Restore the previous confirmed text on blur if nothing new was chosen.
+            input.addEventListener('mousedown', function () {
+                if (document.activeElement !== this) {
+                    this.value = '';
+                }
+            });
+
+            input.addEventListener('blur', function () {
+                if (!target.value && lastConfirmedText) {
+                    input.value = lastConfirmedText;
+                }
             });
         });
     </script>

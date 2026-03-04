@@ -9,8 +9,11 @@ var builder = WebApplication.CreateBuilder(args);
 var metadataService = new EntityMetadataService();
 builder.Services.AddSingleton(metadataService);
 
-builder.Services.AddDbContext<CmdbContext>(options =>
-    options.UseOracle(builder.Configuration.GetConnectionString("CmdbContext")));
+builder.Services.AddHttpContextAccessor();
+builder.Services.AddSingleton<AuditHistoryInterceptor>();
+builder.Services.AddDbContext<CmdbContext>((sp, options) =>
+    options.UseOracle(builder.Configuration.GetConnectionString("CmdbContext"))
+           .AddInterceptors(sp.GetRequiredService<AuditHistoryInterceptor>()));
 
 builder.Services.AddHttpClient();
 builder.Services.AddSingleton<CountrySyncService>();

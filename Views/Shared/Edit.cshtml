@@ -18,7 +18,7 @@
 <div class="row">
     <div class="col-md-4">
         <form asp-action="Edit" asp-controller="@controllerName" method="post">
-            <div asp-validation-summary="ModelOnly" class="text-danger"></div>
+            <div asp-validation-summary="All" class="text-danger"></div>
             @foreach (var pk in primaryKeys)
             {
                 var pkValue = modelType.GetProperty(pk)?.GetValue(modelObj);
@@ -106,15 +106,96 @@
     <a asp-action="Index" asp-controller="@controllerName">Back to List</a>
 </div>
 
+@{
+    var auditHistory = ViewData["AuditHistory"] as List<service.Models.AuditHistoryEntry>;
+}
+@if (auditHistory != null)
+{
+    <hr />
+    <h5>Change History</h5>
+    @if (auditHistory.Count == 0)
+    {
+        <p class="text-muted small">No changes recorded yet.</p>
+    }
+    else
+    {
+        <div class="table-responsive">
+            <table class="table table-sm table-striped table-bordered small">
+                <thead class="table-dark">
+                    <tr>
+                        <th>Date / Time</th>
+                        <th>Action</th>
+                        <th>Property</th>
+                        <th>Old Value</th>
+                        <th>New Value</th>
+                        <th>Changed By</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var entry in auditHistory)
+                    {
+                        <tr>
+                            <td class="text-nowrap">@entry.ChangedAt.ToString("yyyy-MM-dd HH:mm:ss")</td>
+                            <td>
+                                @{
+                                    var badgeClass = entry.ChangeType switch {
+                                        "INSERT" => "bg-success",
+                                        "UPDATE" => "bg-primary",
+                                        "DELETE" => "bg-danger",
+                                        _ => "bg-secondary"
+                                    };
+                                }
+                                <span class="badge @badgeClass">@entry.ChangeType</span>
+                            </td>
+                            <td>@entry.PropertyName</td>
+                            <td class="text-danger">@entry.OldValue</td>
+                            <td class="text-success">@entry.NewValue</td>
+                            <td>@entry.ChangedBy</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    }
+}
+
 @section Scripts {
     <partial name="_ValidationScriptsPartial" />
     <script>
         document.querySelectorAll('.fk-autocomplete').forEach(function (input) {
-            input.addEventListener('input', function () {
-                var target = document.getElementById(this.dataset.target);
-                var list = document.getElementById(this.getAttribute('list'));
-                var option = list.querySelector('option[value="' + CSS.escape(this.value) + '"]');
-                target.value = option ? option.dataset.id : '';
+            var target = document.getElementById(input.dataset.target);
+            var list   = document.getElementById(input.getAttribute('list'));
+            var lastConfirmedText = input.value;
+
+            function syncId() {
+                var option = list.querySelector('option[value="' + CSS.escape(input.value) + '"]');
+                if (option) {
+                    target.value = option.dataset.id;
+                    lastConfirmedText = input.value;
+                } else {
+                    target.value = '';
+                }
+            }
+
+            input.addEventListener('input',  syncId);
+            input.addEventListener('change', syncId);
+
+            // Clear field on click so the datalist shows all options.
+            // Restore the previous confirmed text on blur if nothing new was chosen.
+            input.addEventListener('mousedown', function () {
+                if (document.activeElement !== this) {
+                    // Will gain focus — clear so datalist shows all entries
+                    this._clearing = true;
+                    this.value = '';
+                }
+            });
+
+            input.addEventListener('blur', function () {
+                if (!target.value && lastConfirmedText) {
+                    // User clicked away without making a new selection — restore
+                    input.value = lastConfirmedText;
+                }
+                this._clearing = false;
             });
         });
     </script>
