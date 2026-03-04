@@ -28,5 +28,7 @@ public record EntityMetadata(
     List<string> NavigationIncludes,
     string? SearchExpression,
     string DefaultSort,
-    List<string> SortableColumns
+    List<string> SortableColumns,
+    string Icon = "bi-table",
+    string Description = ""
 );

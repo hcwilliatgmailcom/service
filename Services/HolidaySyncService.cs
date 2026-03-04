@@ -1,33 +1,21 @@
-using System.Net.Http;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Logging;
-using service.Data;
 using service.Models;
 
 namespace service.Services;
 
-public class HolidaySyncService
+public class HolidaySyncService(
+    IHttpClientFactory httpClientFactory,
+    IServiceProvider serviceProvider,
+    ILogger<HolidaySyncService> logger)
+    : BaseSyncService(serviceProvider)
 {
-    private const int BatchSize = 500;
     private const int MaxParallelFetches = 10;
 
-    private readonly IHttpClientFactory _httpClientFactory;
-    private readonly IServiceProvider _serviceProvider;
-    private readonly ILogger<HolidaySyncService> _logger;
-
-    public HolidaySyncService(
-        IHttpClientFactory httpClientFactory,
-        IServiceProvider serviceProvider,
-        ILogger<HolidaySyncService> logger)
-    {
-        _httpClientFactory = httpClientFactory;
-        _serviceProvider = serviceProvider;
-        _logger = logger;
-    }
-
     public record HolidayDto(string CountryCode, DateTime Date, string Name, string? LocalName, string? Type);
+
+    // Intermediate record with resolved CountryId — used only inside UpsertAsync
+    private record ResolvedHolidayDto(decimal CountryId, DateTime Date, string Name, string? LocalName, string? Type);
 
     public async Task<(int Added, int Updated)> SyncAsync(CancellationToken ct)
     {
@@ -47,14 +35,14 @@ public class HolidaySyncService
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Holiday sync failed.");
+            logger.LogError(ex, "Holiday sync failed.");
             return (0, 0);
         }
     }
 
     public async Task<List<HolidayDto>> FetchAsync(List<string> countryCodes, CancellationToken ct)
     {
-        var client = _httpClientFactory.CreateClient();
+        var client = httpClientFactory.CreateClient();
         var year = DateTime.Now.Year;
         var semaphore = new SemaphoreSlim(MaxParallelFetches);
         var results = new List<HolidayDto>();
@@ -78,21 +66,18 @@ public class HolidaySyncService
                     var dateStr = item.TryGetProperty("date", out var d) ? d.GetString() : null;
                     if (dateStr == null || !DateTime.TryParse(dateStr, out var date)) continue;
 
-                    var name = item.TryGetProperty("name", out var n) ? n.GetString() ?? "" : "";
+                    var name      = item.TryGetProperty("name",      out var n)  ? n.GetString()  ?? "" : "";
                     var localName = item.TryGetProperty("localName", out var ln) ? ln.GetString() : null;
-                    var type = item.TryGetProperty("type", out var t) ? t.GetString() : null;
+                    var type      = item.TryGetProperty("type",      out var t)  ? t.GetString()  : null;
 
                     batch.Add(new HolidayDto(code, date, name, localName, type));
                 }
 
-                lock (lockObj)
-                {
-                    results.AddRange(batch);
-                }
+                lock (lockObj) { results.AddRange(batch); }
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "Failed to fetch holidays for {Code}.", code);
+                logger.LogWarning(ex, "Failed to fetch holidays for {Code}.", code);
             }
             finally
             {
@@ -101,109 +86,61 @@ public class HolidaySyncService
         });
 
         await Task.WhenAll(tasks);
-        _logger.LogInformation("Fetched {Count} holidays from API.", results.Count);
+        logger.LogInformation("Fetched {Count} holidays from API.", results.Count);
         return results;
     }
 
     public async Task<(int Added, int Updated)> UpsertAsync(List<HolidayDto> data, CancellationToken ct)
     {
+        // Resolve CountryCode → CountryId before handing off to the generic loop
         Dictionary<string, decimal> countryByCode;
-        HashSet<(decimal CountryId, DateTime Date, string Name)> existingKeys;
-
-        using (var readDb = CreateDbContext())
+        using (var db = CreateDbContext())
         {
-            countryByCode = await readDb.Countries
+            countryByCode = await db.Countries
                 .AsNoTracking()
                 .ToDictionaryAsync(c => c.Code, c => c.Id, ct);
-
-            existingKeys = (await readDb.Publicholidays
-                .AsNoTracking()
-                .Select(h => new { h.CountryId, h.Date, h.Name })
-                .ToListAsync(ct))
-                .Select(h => (h.CountryId, h.Date, h.Name))
-                .ToHashSet();
         }
 
         var resolved = data
             .Where(d => countryByCode.ContainsKey(d.CountryCode))
-            .Select(d => (Dto: d, CountryId: countryByCode[d.CountryCode]))
+            .Select(d => new ResolvedHolidayDto(countryByCode[d.CountryCode], d.Date, d.Name, d.LocalName, d.Type))
             .ToList();
 
-        var toInsert = resolved
-            .Where(r => !existingKeys.Contains((r.CountryId, r.Dto.Date, r.Dto.Name)))
-            .ToList();
-        var toUpdate = resolved
-            .Where(r => existingKeys.Contains((r.CountryId, r.Dto.Date, r.Dto.Name)))
-            .ToList();
-
-        int added = 0, updated = 0;
-
-        foreach (var batch in Chunk(toInsert, BatchSize))
-        {
-            using var db = CreateDbContext();
-            foreach (var (dto, countryId) in batch)
+        var result = await UpsertAsync(
+            resolved,
+            loadKeys: async (db, t) =>
+                (await db.Publicholidays
+                    .AsNoTracking()
+                    .Select(h => new { h.CountryId, h.Date, h.Name })
+                    .ToListAsync(t))
+                .Select(h => (h.CountryId, h.Date, h.Name))
+                .ToHashSet(),
+            keyOf: dto => (dto.CountryId, dto.Date, dto.Name),
+            create: dto => new Publicholiday
             {
-                db.Publicholidays.Add(new Publicholiday
-                {
-                    Date = dto.Date,
-                    Name = dto.Name,
-                    LocalName = dto.LocalName,
-                    Type = dto.Type,
-                    CountryId = countryId
-                });
-                added++;
-            }
-
-            db.ChangeTracker.DetectChanges();
-            await db.SaveChangesAsync(ct);
-        }
-
-        foreach (var batch in Chunk(toUpdate, BatchSize))
-        {
-            using var db = CreateDbContext();
-
-            var keys = batch
-                .Select(r => new { r.CountryId, r.Dto.Date, r.Dto.Name })
-                .ToList();
-
-            var countryIds = keys.Select(k => k.CountryId).Distinct().ToList();
-            var dates = keys.Select(k => k.Date).Distinct().ToList();
-
-            var entities = await db.Publicholidays
-                .Where(h => countryIds.Contains(h.CountryId) && dates.Contains(h.Date))
-                .ToListAsync(ct);
-
-            var entityLookup = entities
-                .ToDictionary(h => (h.CountryId, h.Date, h.Name));
-
-            foreach (var (dto, countryId) in batch)
+                CountryId = dto.CountryId,
+                Date      = dto.Date,
+                Name      = dto.Name,
+                LocalName = dto.LocalName,
+                Type      = dto.Type
+            },
+            fetch: async (db, keys, t) =>
             {
-                if (!entityLookup.TryGetValue((countryId, dto.Date, dto.Name), out var entity))
-                    continue;
+                var countryIds = keys.Select(k => k.CountryId).Distinct().ToList();
+                var dates      = keys.Select(k => k.Date).Distinct().ToList();
+                var entities   = await db.Publicholidays
+                    .Where(h => countryIds.Contains(h.CountryId) && dates.Contains(h.Date))
+                    .ToListAsync(t);
+                return entities.ToDictionary(h => (h.CountryId, h.Date, h.Name));
+            },
+            apply: (entity, dto) =>
+            {
                 entity.LocalName = dto.LocalName;
-                entity.Type = dto.Type;
-                updated++;
-            }
+                entity.Type      = dto.Type;
+            },
+            ct);
 
-            db.ChangeTracker.DetectChanges();
-            await db.SaveChangesAsync(ct);
-        }
-
-        _logger.LogInformation("Holidays synced: {Added} added, {Updated} updated.", added, updated);
-        return (added, updated);
-    }
-
-    private CmdbContext CreateDbContext()
-    {
-        var scope = _serviceProvider.CreateScope();
-        var db = scope.ServiceProvider.GetRequiredService<CmdbContext>();
-        db.ChangeTracker.AutoDetectChangesEnabled = false;
-        return db;
-    }
-
-    private static IEnumerable<List<T>> Chunk<T>(List<T> source, int size)
-    {
-        for (var i = 0; i < source.Count; i += size)
-            yield return source.GetRange(i, Math.Min(size, source.Count - i));
+        logger.LogInformation("Holidays synced: {Added} added, {Updated} updated.", result.Added, result.Updated);
+        return result;
     }
 }

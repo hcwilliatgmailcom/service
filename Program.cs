@@ -26,7 +26,23 @@ var tempOptions = new DbContextOptionsBuilder<CmdbContext>()
     .Options;
 using (var tempContext = new CmdbContext(tempOptions))
 {
-    metadataService.Build(tempContext);
+    var connStr = builder.Configuration.GetConnectionString("CmdbContext")!;
+
+    var dbSetNameByType = typeof(CmdbContext).GetProperties()
+        .Where(p => p.PropertyType.IsGenericType &&
+                    p.PropertyType.GetGenericTypeDefinition() == typeof(Microsoft.EntityFrameworkCore.DbSet<>))
+        .ToDictionary(p => p.PropertyType.GetGenericArguments()[0], p => p.Name);
+
+    var entities = tempContext.Model.GetEntityTypes()
+        .Where(e => e.FindPrimaryKey() != null && dbSetNameByType.ContainsKey(e.ClrType))
+        .Select(e => (
+            Schema:    (e.GetSchema() ?? "CMDB").ToUpperInvariant(),
+            TableName: (e.GetTableName() ?? e.ClrType.Name).ToUpperInvariant(),
+            DbSetName: dbSetNameByType[e.ClrType]
+        ));
+
+    var entityConfig = TableCommentBootstrap.EnsureAndLoad(connStr, entities);
+    metadataService.Build(tempContext, entityConfig);
 }
 
 // Add controllers with generic controller support

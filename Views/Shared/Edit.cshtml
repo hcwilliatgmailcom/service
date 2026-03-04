@@ -38,27 +38,26 @@
                 {
                     var fk = foreignKeys[name];
                     var selectList = ViewData[name] as Microsoft.AspNetCore.Mvc.Rendering.SelectList;
-                    var listId = $"list_{name}";
                     var selectedText = selectList?.SelectedValue != null
                         ? selectList.FirstOrDefault(i => i.Value == selectList.SelectedValue.ToString())?.Text ?? ""
                         : "";
-                    <div class="form-group mb-3">
+                    <div class="form-group mb-3 fk-wrapper">
                         <label class="control-label">@fk["NavigationProperty"]</label>
                         <input type="hidden" name="@name" id="@name" value="@currentValue" />
                         <input type="text" class="form-control fk-autocomplete"
-                               id="display_@name" list="@listId"
+                               id="display_@name"
                                value="@selectedText"
                                data-target="@name"
                                autocomplete="off" />
-                        <datalist id="@listId">
+                        <div class="fk-dropdown" id="dropdown_@name">
                             @if (selectList != null)
                             {
                                 @foreach (var item in selectList)
                                 {
-                                    <option value="@item.Text" data-id="@item.Value"></option>
+                                    <div class="fk-option" data-id="@item.Value" data-text="@item.Text">@item.Text</div>
                                 }
                             }
-                        </datalist>
+                        </div>
                         <span class="text-danger" data-valmsg-for="@name" data-valmsg-replace="true"></span>
                     </div>
                 }
@@ -161,42 +160,5 @@
 
 @section Scripts {
     <partial name="_ValidationScriptsPartial" />
-    <script>
-        document.querySelectorAll('.fk-autocomplete').forEach(function (input) {
-            var target = document.getElementById(input.dataset.target);
-            var list   = document.getElementById(input.getAttribute('list'));
-            var lastConfirmedText = input.value;
-
-            function syncId() {
-                var option = list.querySelector('option[value="' + CSS.escape(input.value) + '"]');
-                if (option) {
-                    target.value = option.dataset.id;
-                    lastConfirmedText = input.value;
-                } else {
-                    target.value = '';
-                }
-            }
-
-            input.addEventListener('input',  syncId);
-            input.addEventListener('change', syncId);
-
-            // Clear field on click so the datalist shows all options.
-            // Restore the previous confirmed text on blur if nothing new was chosen.
-            input.addEventListener('mousedown', function () {
-                if (document.activeElement !== this) {
-                    // Will gain focus — clear so datalist shows all entries
-                    this._clearing = true;
-                    this.value = '';
-                }
-            });
-
-            input.addEventListener('blur', function () {
-                if (!target.value && lastConfirmedText) {
-                    // User clicked away without making a new selection — restore
-                    input.value = lastConfirmedText;
-                }
-                this._clearing = false;
-            });
-        });
-    </script>
+    <partial name="_FKAutocomplete" />
 }

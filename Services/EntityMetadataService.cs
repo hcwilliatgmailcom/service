@@ -20,8 +20,11 @@ public class EntityMetadataService
     public IEnumerable<EntityMetadata> GetAllEntities() =>
         _metadata.Values.OrderBy(m => m.DisplayName);
 
-    public void Build(CmdbContext context)
+    public void Build(CmdbContext context,
+        Dictionary<string, (string Icon, string Description)>? entityConfig = null)
     {
+        entityConfig ??= new Dictionary<string, (string Icon, string Description)>(
+            StringComparer.OrdinalIgnoreCase);
         var model = context.Model;
 
         // Map CLR types to their DbSet property names
@@ -125,6 +128,8 @@ public class EntityMetadataService
 
             var displayName = SplitPascalCase(clrType.Name);
 
+            entityConfig.TryGetValue(dbSetName, out var cfg);
+
             var metadata = new EntityMetadata(
                 ClrType: clrType,
                 DbSetName: dbSetName,
@@ -136,7 +141,9 @@ public class EntityMetadataService
                 NavigationIncludes: navigationIncludes,
                 SearchExpression: searchExpression,
                 DefaultSort: defaultSort,
-                SortableColumns: sortableColumns
+                SortableColumns: sortableColumns,
+                Icon: cfg.Icon ?? "bi-table",
+                Description: cfg.Description ?? "Manage " + displayName
             );
 
             _metadata[clrType] = metadata;

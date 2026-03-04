@@ -2,64 +2,6 @@
 @inject EntityMetadataService MetadataService
 @{
     ViewData["Title"] = "CMDB Dashboard";
-
-    var iconMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
-    {
-        ["Locations"] = "bi-geo-alt",
-        ["Departments"] = "bi-building",
-        ["Vendors"] = "bi-shop",
-        ["Environments"] = "bi-layers",
-        ["Racks"] = "bi-grid-3x3",
-        ["OperatingSystems"] = "bi-cpu",
-        ["Servers"] = "bi-hdd-rack",
-        ["Networks"] = "bi-diagram-3",
-        ["Applications"] = "bi-app-indicator",
-        ["DatabaseInstances"] = "bi-database",
-        ["Storages"] = "bi-device-hdd",
-        ["Firewalls"] = "bi-shield-lock",
-        ["Switches"] = "bi-ethernet",
-        ["Certificates"] = "bi-file-earmark-lock",
-        ["Contacts"] = "bi-person",
-        ["Licenses"] = "bi-key",
-        ["ServerApplications"] = "bi-box-arrow-in-right",
-        ["ApplicationDatabases"] = "bi-link-45deg",
-        ["ServerNetworks"] = "bi-plug",
-        ["ContactDepartments"] = "bi-people",
-        ["Countries"] = "bi-globe",
-        ["Publicholidays"] = "bi-calendar-event",
-    };
-
-    var descriptionMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
-    {
-        ["Locations"] = "Data centers, offices, and facility locations",
-        ["Departments"] = "Organizational departments and cost centers",
-        ["Vendors"] = "Hardware and software vendors",
-        ["Environments"] = "Deployment environments (Dev, Staging, Prod)",
-        ["Racks"] = "Server rack locations and capacity",
-        ["OperatingSystems"] = "OS versions and lifecycle tracking",
-        ["Servers"] = "Physical and virtual server inventory",
-        ["Networks"] = "Network segments, subnets, and VLANs",
-        ["Applications"] = "Business applications and their tiers",
-        ["DatabaseInstances"] = "Database engines, versions, and sizes",
-        ["Storages"] = "Storage systems and capacity usage",
-        ["Firewalls"] = "Firewall appliances and firmware",
-        ["Switches"] = "Network switches and port counts",
-        ["Certificates"] = "SSL/TLS certificates and expiry dates",
-        ["Contacts"] = "IT staff and department contacts",
-        ["Licenses"] = "Software licenses and seat counts",
-        ["ServerApplications"] = "Application installations on servers",
-        ["ApplicationDatabases"] = "Application to database mappings",
-        ["ServerNetworks"] = "Server network interface assignments",
-        ["ContactDepartments"] = "Contact to department associations",
-        ["Countries"] = "Country data synced from REST Countries API",
-        ["Publicholidays"] = "Public holidays synced from Nager.Date API",
-    };
-
-    string GetIcon(string dbSetName) =>
-        iconMap.TryGetValue(dbSetName, out var icon) ? icon : "bi-table";
-
-    string GetDescription(string dbSetName) =>
-        descriptionMap.TryGetValue(dbSetName, out var desc) ? desc : "Manage " + dbSetName;
 }
 
 <h1 class="mb-4">CMDB Dashboard</h1>
@@ -71,16 +13,14 @@
 <div class="row row-cols-1 row-cols-md-2 row-cols-lg-3 row-cols-xl-4 g-3" id="entityGrid">
     @foreach (var entity in MetadataService.GetAllEntities())
     {
-        var icon = GetIcon(entity.DbSetName);
-        var description = GetDescription(entity.DbSetName);
-        <div class="col entity-card" data-name="@entity.DisplayName.ToLower()" data-desc="@description.ToLower()">
+        <div class="col entity-card" data-name="@entity.DisplayName.ToLower()" data-desc="@entity.Description.ToLower()">
             <a asp-controller="@entity.DbSetName" asp-action="Index" class="text-decoration-none">
                 <div class="card h-100 shadow-sm">
                     <div class="card-body">
                         <h5 class="card-title">
-                            <i class="bi @icon me-2"></i>@entity.DisplayName
+                            <i class="bi @entity.Icon me-2"></i>@entity.DisplayName
                         </h5>
-                        <p class="card-text text-muted small">@description</p>
+                        <p class="card-text text-muted small">@entity.Description</p>
                     </div>
                 </div>
             </a>

@@ -75,6 +75,10 @@ public class CrudController<T> : Controller where T : class
     {
         var meta = Meta;
         ViewData["CurrentSort"] = sortOrder;
+        foreach (var pk in meta.PrimaryKeys)
+        {
+            ViewData[pk + "SortParm"] = sortOrder == pk ? pk + "_desc" : pk;
+        }
         foreach (var col in meta.SortableColumns)
         {
             ViewData[col + "SortParm"] = sortOrder == col ? col + "_desc" : col;
