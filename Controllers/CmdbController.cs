@@ -751,12 +751,11 @@ public class CmdbController : Controller
             var request = new HttpRequestMessage(HttpMethod.Get, url);
             var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
             var exists = response.IsSuccessStatusCode;
-            lock (_syncLock) { _syncCache[table] = exists; }
+            if (exists) lock (_syncLock) { _syncCache[table] = true; }
             return exists;
         }
         catch
         {
-            lock (_syncLock) { _syncCache[table] = false; }
             return false;
         }
     }
@@ -893,7 +892,7 @@ public class CmdbController : Controller
 
     private void ClearAllCaches()
     {
-        ClearAllCaches();
+        _schema.ClearCache();
         lock (_syncLock) { _syncCache.Clear(); }
     }
 

@@ -16,7 +16,11 @@ public class SchemaService
 
     public OracleConnection GetConnection()
     {
-        var conn = new OracleConnection(_connStr);
+        var builder = new OracleConnectionStringBuilder(_connStr)
+        {
+            StatementCacheSize = 0
+        };
+        var conn = new OracleConnection(builder.ToString());
         conn.Open();
         return conn;
     }
@@ -167,9 +171,22 @@ public class SchemaService
 
     public List<Dictionary<string, object?>> Query(OracleConnection conn, string sql, params OracleParameter[] parms)
     {
+        try
+        {
+            return RunQuery(conn, sql, parms);
+        }
+        catch (OracleException ex) when (ex.Number == 24449)
+        {
+            conn.PurgeStatementCache();
+            return RunQuery(conn, sql, parms);
+        }
+    }
+
+    private static List<Dictionary<string, object?>> RunQuery(OracleConnection conn, string sql, OracleParameter[] parms)
+    {
         using var cmd = new OracleCommand(sql, conn);
         cmd.BindByName = true;
-        foreach (var p in parms) cmd.Parameters.Add(p);
+        foreach (var p in parms) cmd.Parameters.Add(new OracleParameter(p.ParameterName, p.Value));
         using var rdr = cmd.ExecuteReader();
         var results = new List<Dictionary<string, object?>>();
         while (rdr.Read())
@@ -190,9 +207,22 @@ public class SchemaService
 
     public int Execute(OracleConnection conn, string sql, params OracleParameter[] parms)
     {
+        try
+        {
+            return RunExecute(conn, sql, parms);
+        }
+        catch (OracleException ex) when (ex.Number == 24449)
+        {
+            conn.PurgeStatementCache();
+            return RunExecute(conn, sql, parms);
+        }
+    }
+
+    private static int RunExecute(OracleConnection conn, string sql, OracleParameter[] parms)
+    {
         using var cmd = new OracleCommand(sql, conn);
         cmd.BindByName = true;
-        foreach (var p in parms) cmd.Parameters.Add(p);
+        foreach (var p in parms) cmd.Parameters.Add(new OracleParameter(p.ParameterName, p.Value));
         return cmd.ExecuteNonQuery();
     }
 
