@@ -1,0 +1,181 @@
+@{
+    ViewData["Title"] = ((EntityMeta)ViewBag.Entity).DisplayName;
+    var entity = (EntityMeta)ViewBag.Entity;
+    var tableName = (string)ViewBag.TableName;
+    var columns = (List<DisplayColumn>)ViewBag.Columns;
+    var colNames = (List<string>)ViewBag.ColNames;
+    var rows = (List<Dictionary<string, object?>>)ViewBag.Rows;
+    var pkCols = (List<string>)ViewBag.PkCols;
+    var fkDisplayMap = (Dictionary<string, (string alias, string displayMember, string navName)>)ViewBag.FkDisplayMap;
+    var search = (string)ViewBag.Search;
+    var sort = (string)ViewBag.Sort;
+    var sortDir = (string)ViewBag.SortDir;
+    var page = (int)ViewBag.Page;
+    var totalPages = (int)ViewBag.TotalPages;
+    var allEntities = (List<EntityMeta>)ViewBag.AllEntities;
+}
+<h1>@entity.DisplayName</h1>
+
+<form method="get" action="/entity/@tableName" class="mb-3">
+    <div class="input-group">
+        <input type="text" name="search" value="@search" class="form-control" placeholder="Search..."/>
+        <button type="submit" class="btn btn-primary"><i class="bi bi-search me-1"></i>Search</button>
+        @if (!string.IsNullOrEmpty(search))
+        {
+            <a href="/entity/@tableName" class="btn btn-outline-secondary">Clear</a>
+        }
+        <a href="/entity/@tableName/create" class="btn btn-danger">
+            <i class="bi bi-plus-circle me-1"></i>Create
+        </a>
+    </div>
+</form>
+
+<div class="table-responsive">
+<table class="table table-striped">
+    <thead>
+        <tr>
+        <th></th>
+        @foreach (var col in columns)
+        {
+            var newDir = (sort == col.SortKey && sortDir == "asc") ? "desc" : "asc";
+            <th>
+                <a href="/entity/@tableName?search=@Uri.EscapeDataString(search)&sort=@Uri.EscapeDataString(col.SortKey)&dir=@newDir">
+                    @(col.IsFk ? col.Name.ToUpper() : col.Name)
+                    @if (sort == col.SortKey)
+                    {
+                        <i class="bi bi-caret-@(sortDir == "asc" ? "up" : "down")-fill"></i>
+                    }
+                </a>
+            </th>
+        }
+        </tr>
+    </thead>
+    <tbody>
+        @foreach (var row in rows)
+        {
+            var pkParams = string.Join("&", pkCols.Select(pk => $"{pk}={Uri.EscapeDataString(row[pk]?.ToString() ?? "")}"));
+            var pkLabel = string.Join(", ", pkCols.Select(pk => row[pk]?.ToString() ?? ""));
+            <tr>
+                <td class="text-nowrap">
+                    <a href="/entity/@tableName/edit?@pkParams" class="btn btn-sm btn-primary">@pkLabel</a>
+                </td>
+                @foreach (var col in columns)
+                {
+                    if (col.IsFk)
+                    {
+                        <td>@(row.ContainsKey(col.Name) ? row[col.Name]?.ToString() ?? "" : "")</td>
+                    }
+                    else
+                    {
+                        var colIdx = colNames.IndexOf(col.SortKey);
+                        var colKey = colIdx >= 0 ? colNames[colIdx] : col.SortKey;
+                        <td>@(row.ContainsKey(colKey) ? row[colKey]?.ToString() ?? "" : "")</td>
+                    }
+                }
+            </tr>
+        }
+    </tbody>
+</table>
+</div>
+
+<div class="d-flex justify-content-between align-items-center">
+    <nav>
+        <ul class="pagination mb-0">
+            @if (page > 1)
+            {
+                <li class="page-item"><a class="page-link" href="/entity/@tableName?search=@Uri.EscapeDataString(search)&sort=@Uri.EscapeDataString(sort)&dir=@sortDir&page=@(page-1)">Previous</a></li>
+            }
+            else
+            {
+                <li class="page-item disabled"><span class="page-link">Previous</span></li>
+            }
+            <li class="page-item disabled"><span class="page-link">@($"Page {page} of {totalPages}")</span></li>
+            @if (page < totalPages)
+            {
+                <li class="page-item"><a class="page-link" href="/entity/@tableName?search=@Uri.EscapeDataString(search)&sort=@Uri.EscapeDataString(sort)&dir=@sortDir&page=@(page+1)">Next</a></li>
+            }
+            else
+            {
+                <li class="page-item disabled"><span class="page-link">Next</span></li>
+            }
+        </ul>
+    </nav>
+    <div>
+        <!-- Schema Dropdown -->
+        <div class="dropdown d-inline-block me-1">
+            <button class="btn btn-success dropdown-toggle" type="button" data-bs-toggle="dropdown">
+                <i class="bi bi-gear me-1"></i>Schema
+            </button>
+            <div class="dropdown-menu p-3" style="min-width:350px;">
+                <h6 class="dropdown-header">Add Column</h6>
+                <form method="post" action="/add_column/@tableName" class="mb-3">
+                    <div class="input-group input-group-sm mb-1">
+                        <input type="text" name="column_name" class="form-control" placeholder="Column name" required/>
+                        <select name="column_type" class="form-select">
+                            <option value="VARCHAR2(200)">Text</option>
+                            <option value="NUMBER">Number</option>
+                            <option value="DATE">Date</option>
+                            <option value="TIMESTAMP">Timestamp</option>
+                        </select>
+                        <button type="submit" class="btn btn-sm btn-success">Add</button>
+                    </div>
+                </form>
+                <h6 class="dropdown-header">Drop Column</h6>
+                <form method="post" action="/drop_column/@tableName" class="mb-3">
+                    <div class="input-group input-group-sm mb-1">
+                        <select name="column_name" class="form-select">
+                            @foreach (var col in entity.Columns.Where(c => !pkCols.Contains(c.ColumnName)))
+                            {
+                                <option value="@col.ColumnName">@col.ColumnName</option>
+                            }
+                        </select>
+                        <button type="submit" class="btn btn-sm btn-success">Drop</button>
+                    </div>
+                </form>
+                <h6 class="dropdown-header">Add Reference</h6>
+                <form method="post" action="/add_reference/@tableName" class="mb-3">
+                    <div class="input-group input-group-sm mb-1">
+                        <select name="ref_table" class="form-select">
+                            @foreach (var e in allEntities)
+                            {
+                                <option value="@e.TableName">@e.DisplayName</option>
+                            }
+                        </select>
+                        <button type="submit" class="btn btn-sm btn-success">Add</button>
+                    </div>
+                </form>
+                <h6 class="dropdown-header">Drop Reference</h6>
+                <form method="post" action="/drop_reference/@tableName" class="mb-3">
+                    <div class="input-group input-group-sm mb-1">
+                        <select name="column_name" class="form-select">
+                            @foreach (var col in entity.Columns.Where(c => c.IsFk))
+                            {
+                                <option value="@col.ColumnName">@col.ColumnName</option>
+                            }
+                        </select>
+                        <button type="submit" class="btn btn-sm btn-success">Drop</button>
+                    </div>
+                </form>
+                <hr/>
+                <form method="post" action="/drop_table/@tableName" onsubmit="return confirm('Drop table @tableName?');">
+                    <button type="submit" class="btn btn-sm btn-success w-100">Drop Table @tableName</button>
+                </form>
+            </div>
+        </div>
+        <a href="/entity/@tableName/export" class="btn btn-warning me-1">
+            <i class="bi bi-download me-1"></i>Export CSV
+        </a>
+        <form method="post" action="/entity/@tableName/import" enctype="multipart/form-data" class="d-inline-block">
+            <label class="btn btn-warning mb-0">
+                <i class="bi bi-upload me-1"></i>Import CSV
+                <input type="file" name="file" accept=".csv" class="d-none" onchange="this.form.submit();"/>
+            </label>
+        </form>
+        @if ((bool)ViewBag.Syncable)
+        {
+            <form method="post" action="/entity/@tableName/sync" class="d-inline">
+                <button type="submit" class="btn btn-warning"><i class="bi bi-arrow-repeat me-1"></i>Sync</button>
+            </form>
+        }
+    </div>
+</div>

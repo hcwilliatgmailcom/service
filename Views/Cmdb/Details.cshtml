@@ -1,0 +1,32 @@
+@{
+    var entity = (EntityMeta)ViewBag.Entity;
+    var tableName = (string)ViewBag.TableName;
+    var row = (Dictionary<string, object?>)ViewBag.Row;
+    var fkDisplay = (Dictionary<string, string>)ViewBag.FkDisplay;
+    ViewData["Title"] = entity.DisplayName + " Details";
+}
+<h1>@entity.DisplayName Details</h1>
+<hr/>
+<dl class="row">
+    @foreach (var col in entity.Columns)
+    {
+        if (fkDisplay.ContainsKey(col.ColumnName))
+        {
+            var navName = fkDisplay[col.ColumnName];
+            <dt class="col-sm-3">@navName</dt>
+            <dd class="col-sm-9">@(row.ContainsKey(navName) ? row[navName]?.ToString() ?? "" : "")</dd>
+        }
+        else
+        {
+            <dt class="col-sm-3">@SchemaService.SplitPascal(col.ColumnName)</dt>
+            <dd class="col-sm-9">@(row.ContainsKey(col.ColumnName) ? row[col.ColumnName]?.ToString() ?? "" : "")</dd>
+        }
+    }
+</dl>
+<div>
+    @{
+        var pkParams = string.Join("&", entity.PkColumns.Select(pk => $"{pk}={Uri.EscapeDataString(row.ContainsKey(pk) ? row[pk]?.ToString() ?? "" : "")}"));
+    }
+    <a href="/entity/@tableName/edit?@pkParams">Edit</a> |
+    <a href="/entity/@tableName">Back to List</a>
+</div>
