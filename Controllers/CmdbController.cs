@@ -249,7 +249,7 @@ public class CmdbController : Controller
                 {
                     var pName = $"p{idx++}";
                     placeholders.Add($":{pName}");
-                    parms.Add(new OracleParameter(pName, val));
+                    parms.Add(MakeTypedParam(pName, val, col));
                 }
             }
 
@@ -342,7 +342,7 @@ public class CmdbController : Controller
                 {
                     var pName = $"u{idx++}";
                     sets.Add($"\"{col.ColumnName}\" = :{pName}");
-                    parms.Add(new OracleParameter(pName, val));
+                    parms.Add(MakeTypedParam(pName, val, col));
                 }
             }
 
@@ -573,7 +573,13 @@ public class CmdbController : Controller
                             if (entity.PkColumns.Contains(h, StringComparer.OrdinalIgnoreCase)) continue;
                             var pName = $"imp{pIdx++}";
                             sets.Add($"\"{h}\" = :{pName}");
-                            parms.Add(new OracleParameter(pName, string.IsNullOrEmpty(values[j]) ? DBNull.Value : values[j]));
+                            var colMeta = entity.Columns.FirstOrDefault(c => c.ColumnName.Equals(h, StringComparison.OrdinalIgnoreCase));
+                            if (string.IsNullOrEmpty(values[j]))
+                                parms.Add(new OracleParameter(pName, DBNull.Value));
+                            else if (colMeta != null)
+                                parms.Add(MakeTypedParam(pName, values[j], colMeta));
+                            else
+                                parms.Add(new OracleParameter(pName, values[j]));
                         }
                         parms.Add(new OracleParameter("matchName", nameVal));
                         if (sets.Count > 0)
@@ -683,7 +689,10 @@ public class CmdbController : Controller
                         if (!mapped.ContainsKey(col.ColumnName)) continue;
                         var pName = $"u{pIdx++}";
                         sets.Add($"\"{col.ColumnName}\" = :{pName}");
-                        parms.Add(new OracleParameter(pName, string.IsNullOrEmpty(mapped[col.ColumnName]) ? DBNull.Value : mapped[col.ColumnName]));
+                        if (string.IsNullOrEmpty(mapped[col.ColumnName]))
+                            parms.Add(new OracleParameter(pName, DBNull.Value));
+                        else
+                            parms.Add(MakeTypedParam(pName, mapped[col.ColumnName], col));
                     }
                     if (sets.Count > 0)
                     {
@@ -715,7 +724,7 @@ public class CmdbController : Controller
                         {
                             var pName = $"i{pIdx++}";
                             placeholders.Add($":{pName}");
-                            parms.Add(new OracleParameter(pName, mapped[col.ColumnName]));
+                            parms.Add(MakeTypedParam(pName, mapped[col.ColumnName], col));
                         }
                     }
                     if (fields.Count > 0)
@@ -900,6 +909,17 @@ public class CmdbController : Controller
 
     // --- Helpers ---
 
+    private static OracleParameter MakeTypedParam(string name, string val, ColumnMeta col)
+    {
+        var dt = col.DataType.ToUpper();
+        if (dt.Contains("DATE") || dt.Contains("TIMESTAMP"))
+        {
+            if (DateTime.TryParse(val, CultureInfo.InvariantCulture, DateTimeStyles.None, out var d))
+                return new OracleParameter(name, OracleDbType.Date) { Value = d };
+        }
+        return new OracleParameter(name, val);
+    }
+
     private Dictionary<string, List<Dictionary<string, object?>>> LoadFkOptions(OracleConnection conn, EntityMeta entity)
     {
         var fkOptions = new Dictionary<string, List<Dictionary<string, object?>>>(StringComparer.OrdinalIgnoreCase);
@@ -937,7 +957,11 @@ public class CmdbController : Controller
             {
                 var pName = $"csv{idx++}";
                 placeholders.Add($":{pName}");
-                parms.Add(new OracleParameter(pName, values[j]));
+                var colMeta = entity.Columns.FirstOrDefault(c => c.ColumnName.Equals(h, StringComparison.OrdinalIgnoreCase));
+                if (colMeta != null)
+                    parms.Add(MakeTypedParam(pName, values[j], colMeta));
+                else
+                    parms.Add(new OracleParameter(pName, values[j]));
             }
         }
 
