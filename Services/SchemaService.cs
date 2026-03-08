@@ -180,6 +180,10 @@ public class SchemaService
             conn.PurgeStatementCache();
             return RunQuery(conn, sql, parms);
         }
+        catch (OracleException ex)
+        {
+            throw new Exception(ex.Message, ex);
+        }
     }
 
     private static List<Dictionary<string, object?>> RunQuery(OracleConnection conn, string sql, OracleParameter[] parms)
@@ -215,6 +219,10 @@ public class SchemaService
         {
             conn.PurgeStatementCache();
             return RunExecute(conn, sql, parms);
+        }
+        catch (OracleException ex)
+        {
+            throw new Exception(ex.Message, ex);
         }
     }
 

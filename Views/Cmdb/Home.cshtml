@@ -4,14 +4,11 @@
 }
 <h1 class="mb-4">CMDB Dashboard</h1>
 
-<form method="post" action="/create_table" class="mb-4">
+<div class="mb-4">
     <div class="input-group input-group-lg">
-        <input type="text" id="entitySearch" name="table_name" class="form-control" placeholder="Search or create table..." autofocus/>
-        <button type="submit" id="createBtn" class="btn btn-danger d-none">
-            <i class="bi bi-plus-circle me-1"></i>Create
-        </button>
+        <input type="text" id="entitySearch" class="form-control" placeholder="Search tables..." autofocus/>
     </div>
-</form>
+</div>
 
 <div class="row row-cols-1 row-cols-md-2 row-cols-lg-3 row-cols-xl-4 g-3" id="entityGrid">
     @foreach (var e in Model)
@@ -34,7 +31,6 @@
 <script>
 (function(){
     var input = document.getElementById('entitySearch');
-    var btn = document.getElementById('createBtn');
     var cards = document.querySelectorAll('.entity-card');
     var noResults = document.getElementById('noResults');
 
@@ -47,12 +43,6 @@
             if(m) vis++;
         });
         noResults.classList.toggle('d-none', vis > 0 || !f);
-        // Show create button when text is entered and no exact match
-        var exact = false;
-        if(f) {
-            cards.forEach(function(c){ if(c.dataset.name === f) exact = true; });
-        }
-        btn.classList.toggle('d-none', !f || exact);
     });
 }());
 </script>

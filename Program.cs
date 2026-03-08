@@ -24,6 +24,22 @@ app.UseStaticFiles();
 app.UseRouting();
 app.UseSession();
 
+// Global error handler: catch unhandled exceptions, show them as a flash message
+app.Use(async (context, next) =>
+{
+    try
+    {
+        await next();
+    }
+    catch (Exception ex)
+    {
+        var msg = ex.InnerException?.Message ?? ex.Message;
+        context.Session.SetString("_flash", $"danger|Error: {msg}");
+        var referer = context.Request.Headers["Referer"].FirstOrDefault() ?? "/";
+        context.Response.Redirect(referer);
+    }
+});
+
 // Auth guard: redirect to /login unless the session has an email or the path is /login or /auth
 app.Use(async (context, next) =>
 {

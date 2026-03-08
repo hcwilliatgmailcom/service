@@ -34,6 +34,7 @@
                 <div class="collapse navbar-collapse" id="navContent">
                     <ul class="navbar-nav flex-grow-1">
                         <li class="nav-item"><a class="nav-link text-dark" href="/">Home</a></li>
+                        <li class="nav-item"><a class="nav-link text-dark" href="/schema">Schema</a></li>
                     </ul>
                     <ul class="navbar-nav ms-auto">
                         <li class="nav-item"><a class="nav-link text-dark" href="/logout">Sign out</a></li>
@@ -43,7 +44,12 @@
         </nav>
     </header>
     <div class="container">
-        @if (TempData["Flash"] is string flash)
+        @{
+            var flash = TempData["Flash"] as string
+                     ?? Context.Session.GetString("_flash");
+            if (flash != null) Context.Session.Remove("_flash");
+        }
+        @if (flash != null)
         {
             var parts = flash.Split('|', 2);
             <div class="alert alert-@parts[0] alert-dismissible fade show">@parts[1]

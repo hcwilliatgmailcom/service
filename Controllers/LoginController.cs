@@ -1,3 +1,5 @@
+using System.Net;
+using System.Net.Mail;
 using Microsoft.AspNetCore.Mvc;
 
 public class LoginController : Controller
@@ -7,10 +9,12 @@ public class LoginController : Controller
     private static readonly object _lock = new();
 
     private readonly ILogger<LoginController> _logger;
+    private readonly IConfiguration _config;
 
-    public LoginController(ILogger<LoginController> logger)
+    public LoginController(ILogger<LoginController> logger, IConfiguration config)
     {
         _logger = logger;
+        _config = config;
     }
 
     // GET /login
@@ -24,7 +28,7 @@ public class LoginController : Controller
 
     // POST /login
     [HttpPost("/login")]
-    public IActionResult Send()
+    public async Task<IActionResult> Send()
     {
         var email = Request.Form["email"].FirstOrDefault()?.Trim() ?? "";
         if (string.IsNullOrEmpty(email))
@@ -48,11 +52,24 @@ public class LoginController : Controller
 
         var isLocalhost = Request.Host.Host is "localhost" or "127.0.0.1" or "::1";
         if (isLocalhost)
+        {
             TempData["MagicLink"] = link;
+            TempData["Flash"] = "success|Your login link is shown below.";
+        }
+        else
+        {
+            try
+            {
+                await SendMagicLinkEmail(email, link);
+                TempData["Flash"] = "success|Check your email for the login link.";
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to send magic link email to {Email}", email);
+                TempData["Flash"] = "danger|Could not send email. Contact an administrator.";
+            }
+        }
 
-        TempData["Flash"] = isLocalhost
-            ? "success|Your login link is shown below."
-            : "success|Check the server log for your login link.";
         return Redirect("/login");
     }
 
@@ -88,5 +105,35 @@ public class LoginController : Controller
     {
         HttpContext.Session.Clear();
         return Redirect("/login");
+    }
+
+    private async Task SendMagicLinkEmail(string to, string link)
+    {
+        var smtp = _config.GetSection("Smtp");
+        var host = smtp["Host"] ?? throw new InvalidOperationException("Smtp:Host not configured");
+        var port = smtp.GetValue("Port", 587);
+        var user = smtp["User"];
+        var pass = smtp["Password"];
+        var from = smtp["From"] ?? user ?? "no-reply@localhost";
+
+        using var client = new SmtpClient(host, port)
+        {
+            EnableSsl = true,
+            Credentials = !string.IsNullOrEmpty(user) ? new NetworkCredential(user, pass) : null
+        };
+
+        var body = $"""
+            <p>Click the link below to sign in to CMDB. This link expires in 15 minutes.</p>
+            <p><a href="{link}">{link}</a></p>
+            """;
+
+        using var msg = new MailMessage(from, to)
+        {
+            Subject = "Your CMDB login link",
+            Body = body,
+            IsBodyHtml = true,
+        };
+
+        await client.SendMailAsync(msg);
     }
 }

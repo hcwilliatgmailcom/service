@@ -33,6 +33,16 @@ public class CmdbController : Controller
         return View("Home", entities);
     }
 
+    // GET /schema
+    [HttpGet("/schema")]
+    public IActionResult Schema()
+    {
+        var entities = _schema.DiscoverEntities()
+            .Values.OrderBy(e => e.DisplayName).ToList();
+        ViewBag.AllEntities = entities;
+        return View("Schema", entities);
+    }
+
     // POST /create_table
     [HttpPost("/create_table")]
     public IActionResult CreateTable()
@@ -58,7 +68,7 @@ public class CmdbController : Controller
             TempData["Flash"] = $"danger|Error: {ex.Message}";
         }
 
-        return Redirect("/");
+        return Redirect("/schema");
     }
 
     // GET /entity/{table}
@@ -193,7 +203,6 @@ public class CmdbController : Controller
         ViewBag.SortDir = dir;
         ViewBag.Page = page;
         ViewBag.TotalPages = totalPages;
-        ViewBag.AllEntities = _schema.DiscoverEntities().Values.OrderBy(e => e.DisplayName).ToList();
         ViewBag.Syncable = syncable;
 
         return View("Index");
@@ -784,7 +793,7 @@ public class CmdbController : Controller
         {
             TempData["Flash"] = $"danger|Error: {ex.Message}";
         }
-        return Redirect("/");
+        return Redirect("/schema");
     }
 
     // POST /add_column/{table}
@@ -793,11 +802,35 @@ public class CmdbController : Controller
     {
         var colName = Request.Form["column_name"].FirstOrDefault()?.Trim().ToUpper() ?? "";
         var colType = Request.Form["column_type"].FirstOrDefault()?.Trim() ?? "VARCHAR2(200)";
+        var refTable = Request.Form["ref_table"].FirstOrDefault()?.Trim().ToUpper() ?? "";
+        var nullable = Request.Form["nullable"].FirstOrDefault() == "on";
+
+        // FK reference mode
+        if (!string.IsNullOrEmpty(refTable))
+        {
+            var fkCol = $"{refTable}_ID";
+            try
+            {
+                using var conn = _schema.GetConnection();
+                _schema.Execute(conn, $"ALTER TABLE \"{table.ToUpper()}\" ADD \"{fkCol}\" NUMBER");
+                ClearAllCaches();
+                TempData["Flash"] = $"success|Reference {fkCol} added.";
+            }
+            catch (Oracle.ManagedDataAccess.Client.OracleException ex) when (ex.Number == 1430)
+            {
+                TempData["Flash"] = $"danger|Column {fkCol} already exists in {table.ToUpper()}.";
+            }
+            catch (Exception ex)
+            {
+                TempData["Flash"] = $"danger|Error: {ex.Message}";
+            }
+            return Redirect("/schema");
+        }
 
         if (string.IsNullOrEmpty(colName))
         {
             TempData["Flash"] = "danger|Column name is required.";
-            return Redirect($"/entity/{table.ToUpper()}");
+            return Redirect("/schema");
         }
 
         colName = new string(colName.Where(c => char.IsLetterOrDigit(c) || c == '_').ToArray());
@@ -812,15 +845,20 @@ public class CmdbController : Controller
                 "TIMESTAMP" => "TIMESTAMP",
                 _ => "VARCHAR2(200)"
             };
-            _schema.Execute(conn, $"ALTER TABLE \"{table.ToUpper()}\" ADD \"{colName}\" {oraType}");
+            var nullClause = nullable ? "" : " NOT NULL";
+            _schema.Execute(conn, $"ALTER TABLE \"{table.ToUpper()}\" ADD \"{colName}\" {oraType}{nullClause}");
             ClearAllCaches();
             TempData["Flash"] = $"success|Column {colName} added.";
+        }
+        catch (Oracle.ManagedDataAccess.Client.OracleException ex) when (ex.Number == 1430)
+        {
+            TempData["Flash"] = $"danger|Column {colName} already exists in {table.ToUpper()}.";
         }
         catch (Exception ex)
         {
             TempData["Flash"] = $"danger|Error: {ex.Message}";
         }
-        return Redirect($"/entity/{table.ToUpper()}");
+        return Redirect("/schema");
     }
 
     // POST /drop_column/{table}
@@ -831,7 +869,12 @@ public class CmdbController : Controller
         if (string.IsNullOrEmpty(colName))
         {
             TempData["Flash"] = "danger|Column name is required.";
-            return Redirect($"/entity/{table.ToUpper()}");
+            return Redirect("/schema");
+        }
+        if (colName.Equals("NAME", StringComparison.OrdinalIgnoreCase))
+        {
+            TempData["Flash"] = "danger|The NAME column cannot be dropped.";
+            return Redirect("/schema");
         }
 
         try
@@ -845,7 +888,7 @@ public class CmdbController : Controller
         {
             TempData["Flash"] = $"danger|Error: {ex.Message}";
         }
-        return Redirect($"/entity/{table.ToUpper()}");
+        return Redirect("/schema");
     }
 
     // POST /add_reference/{table}
@@ -856,7 +899,7 @@ public class CmdbController : Controller
         if (string.IsNullOrEmpty(refTable))
         {
             TempData["Flash"] = "danger|Reference table is required.";
-            return Redirect($"/entity/{table.ToUpper()}");
+            return Redirect("/schema");
         }
 
         var colName = $"{refTable}_ID";
@@ -871,7 +914,7 @@ public class CmdbController : Controller
         {
             TempData["Flash"] = $"danger|Error: {ex.Message}";
         }
-        return Redirect($"/entity/{table.ToUpper()}");
+        return Redirect("/schema");
     }
 
     // POST /drop_reference/{table}
@@ -882,7 +925,7 @@ public class CmdbController : Controller
         if (string.IsNullOrEmpty(colName))
         {
             TempData["Flash"] = "danger|Column name is required.";
-            return Redirect($"/entity/{table.ToUpper()}");
+            return Redirect("/schema");
         }
 
         try
@@ -896,7 +939,7 @@ public class CmdbController : Controller
         {
             TempData["Flash"] = $"danger|Error: {ex.Message}";
         }
-        return Redirect($"/entity/{table.ToUpper()}");
+        return Redirect("/schema");
     }
 
     private void ClearAllCaches()
