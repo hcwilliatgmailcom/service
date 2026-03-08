@@ -41,16 +41,21 @@ public class SchemaService
         using var conn = GetConnection();
 
         var tables = Query(conn, @"
-            SELECT t.TABLE_NAME, c.COMMENTS
+            SELECT t.TABLE_NAME, c.COMMENTS, 'TABLE' AS OBJECT_TYPE
             FROM USER_TABLES t
             LEFT JOIN USER_TAB_COMMENTS c ON c.TABLE_NAME = t.TABLE_NAME
-            ORDER BY t.TABLE_NAME");
+            UNION ALL
+            SELECT v.VIEW_NAME, c.COMMENTS, 'VIEW' AS OBJECT_TYPE
+            FROM USER_VIEWS v
+            LEFT JOIN USER_TAB_COMMENTS c ON c.TABLE_NAME = v.VIEW_NAME
+            ORDER BY TABLE_NAME");
 
         foreach (var tbl in tables)
         {
             var tableName = tbl["TABLE_NAME"]?.ToString() ?? "";
             var comment = tbl["COMMENTS"]?.ToString() ?? "";
-            string icon = "bi-table", desc = tableName;
+            var isView = tbl["OBJECT_TYPE"]?.ToString() == "VIEW";
+            string icon = isView ? "bi-eye" : "bi-table", desc = tableName;
 
             if (!string.IsNullOrEmpty(comment) && comment.Contains('|'))
             {
@@ -65,6 +70,7 @@ public class SchemaService
                 Icon = icon,
                 Description = desc,
                 DisplayName = SplitPascal(tableName),
+                IsView = isView,
             };
 
             meta.Columns = GetColumns(conn, tableName);
@@ -260,6 +266,7 @@ public class EntityMeta
     public List<string> PkColumns { get; set; } = new();
     public string DisplayColumn { get; set; } = "NAME";
     public bool IsCompositePk { get; set; }
+    public bool IsView { get; set; }
 }
 
 public class ColumnMeta

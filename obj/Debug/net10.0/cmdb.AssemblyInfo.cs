@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("cmdb")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+91f66ae592325738ec56b1b23ed48ecf4574315a")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+d4f097cee30a566938d1da7b130317fdef02f95b")]
 [assembly: System.Reflection.AssemblyProductAttribute("cmdb")]
 [assembly: System.Reflection.AssemblyTitleAttribute("cmdb")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]
