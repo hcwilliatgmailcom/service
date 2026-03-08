@@ -76,6 +76,15 @@ public class SchemaService
             meta.Columns = GetColumns(conn, tableName);
             meta.PkColumns = GetPkColumns(conn, tableName);
 
+            // Views have no PK constraints — use ID column as pseudo-PK if available
+            if (isView && meta.PkColumns.Count == 0)
+            {
+                var idCol = meta.Columns.FirstOrDefault(c =>
+                    c.ColumnName.Equals("ID", StringComparison.OrdinalIgnoreCase));
+                if (idCol != null)
+                    meta.PkColumns.Add(idCol.ColumnName);
+            }
+
             foreach (var col in meta.Columns)
             {
                 if (col.ColumnName.EndsWith("_ID", StringComparison.OrdinalIgnoreCase)

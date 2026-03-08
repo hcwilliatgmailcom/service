@@ -27,6 +27,9 @@
     @{
         var pkParams = string.Join("&", entity.PkColumns.Select(pk => $"{pk}={Uri.EscapeDataString(row.ContainsKey(pk) ? row[pk]?.ToString() ?? "" : "")}"));
     }
-    <a href="/entity/@tableName/edit?@pkParams">Edit</a> |
+    @if (!entity.IsView)
+    {
+        <a href="/entity/@tableName/edit?@pkParams">Edit</a><text> | </text>
+    }
     <a href="/entity/@tableName">Back to List</a>
 </div>
