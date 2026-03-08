@@ -28,6 +28,7 @@ public class CmdbController : Controller
     [HttpGet("/")]
     public IActionResult Home()
     {
+        _schema.ClearCache();
         var entities = _schema.DiscoverEntities()
             .Values.OrderBy(e => e.DisplayName).ToList();
         return View("Home", entities);
@@ -38,7 +39,7 @@ public class CmdbController : Controller
     public IActionResult Schema()
     {
         var entities = _schema.DiscoverEntities()
-            .Values.OrderBy(e => e.DisplayName).ToList();
+            .Values.Where(e => !e.IsView).OrderBy(e => e.DisplayName).ToList();
         ViewBag.AllEntities = entities;
         return View("Schema", entities);
     }
@@ -389,6 +390,7 @@ public class CmdbController : Controller
         var selectParts = cols.Select(c => $"\"{table.ToUpper()}\".\"{c.ColumnName}\"").ToList();
         var joinParts = new List<string>();
         var fkDisplay = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var fkLinks = new Dictionary<string, (string refTable, string refPk, bool isView)>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var fk in fkCols)
         {
@@ -399,6 +401,8 @@ public class CmdbController : Controller
             selectParts.Add($"\"{alias}\".\"{displayCol}\" AS \"{navName}\"");
             joinParts.Add($"LEFT JOIN \"{refTable}\" \"{alias}\" ON \"{table.ToUpper()}\".\"{fk.ColumnName}\" = \"{alias}\".\"{fk.FkRefPk}\"");
             fkDisplay[fk.ColumnName] = navName;
+            var isView = entities.TryGetValue(refTable, out var refEntity) && refEntity.IsView;
+            fkLinks[fk.ColumnName] = (refTable, fk.FkRefPk ?? "ID", isView);
         }
 
         var whereParts = pkCols.Select((pk, i) => $"\"{table.ToUpper()}\".\"{pk}\" = :pk{i}").ToList();
@@ -418,6 +422,7 @@ public class CmdbController : Controller
         ViewBag.TableName = table.ToUpper();
         ViewBag.Row = row;
         ViewBag.FkDisplay = fkDisplay;
+        ViewBag.FkLinks = fkLinks;
         return View("Details");
     }
 

@@ -3,6 +3,7 @@
     var tableName = (string)ViewBag.TableName;
     var row = (Dictionary<string, object?>)ViewBag.Row;
     var fkDisplay = (Dictionary<string, string>)ViewBag.FkDisplay;
+    var fkLinks = (Dictionary<string, (string refTable, string refPk, bool isView)>)ViewBag.FkLinks;
     ViewData["Title"] = entity.DisplayName + " Details";
 }
 <h1>@entity.DisplayName Details</h1>
@@ -13,8 +14,20 @@
         if (fkDisplay.ContainsKey(col.ColumnName))
         {
             var navName = fkDisplay[col.ColumnName];
+            var displayVal = row.ContainsKey(navName) ? row[navName]?.ToString() ?? "" : "";
+            var rawId = row.ContainsKey(col.ColumnName) ? row[col.ColumnName]?.ToString() ?? "" : "";
             <dt class="col-sm-3">@navName</dt>
-            <dd class="col-sm-9">@(row.ContainsKey(navName) ? row[navName]?.ToString() ?? "" : "")</dd>
+            <dd class="col-sm-9">
+                @if (fkLinks.TryGetValue(col.ColumnName, out var fkLink) && !string.IsNullOrEmpty(rawId))
+                {
+                    var linkPath = fkLink.isView ? "details" : "edit";
+                    <a href="/entity/@fkLink.refTable/@linkPath?@fkLink.refPk=@Uri.EscapeDataString(rawId)">@displayVal</a>
+                }
+                else
+                {
+                    @displayVal
+                }
+            </dd>
         }
         else
         {
