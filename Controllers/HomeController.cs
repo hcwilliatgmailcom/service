@@ -36,37 +36,69 @@ public class HomeController : Controller
                 ?? "User Id=cmdb;Password=cmdb123;Data Source=localhost:1521/XEPDB1;";
     }
 
-    // GET /
-    [HttpGet("/")]
-    public IActionResult Home()
+    // POST /login
+    [HttpPost("/login")]
+    public async Task<IActionResult> Login()
     {
-        var email = HttpContext.Session.GetString("email");
-        ViewBag.UserEmail = email;
-        if (email == null)
-            return View("Home", new List<Cmdb.Services.EntityMeta>());
+        var email = Request.Form["email"].FirstOrDefault()?.Trim() ?? "";
+        if (string.IsNullOrEmpty(email))
+            return Redirect("/");
 
-        try
+        var token = Guid.NewGuid().ToString("N");
+        lock (_tokenLock) { _tokens[token] = (email, DateTime.UtcNow.AddMinutes(15)); }
+
+        var link = $"{Request.Scheme}://{Request.Host}/auth?token={token}";
+        HttpContext.RequestServices.GetRequiredService<ILogger<HomeController>>()
+            .LogInformation("Magic link for {Email}: {Link}", email, link);
+
+        if (Request.Host.Host is "localhost" or "127.0.0.1" or "::1")
         {
-            ClearCache();
-            var entities = DiscoverEntities()
-                .Values.OrderBy(e => e.DisplayName).ToList();
-            return View("Home", entities);
+            TempData["MagicLink"] = link;
         }
-        catch (Exception ex)
+        else
         {
-            TempData["Flash"] = $"danger|Error loading entities: {ex.Message}";
-            return View("Home", new List<Cmdb.Services.EntityMeta>());
+            try { await SendMagicLinkEmail(email, link); TempData["Flash"] = "success|Check your email for the login link."; }
+            catch (Exception ex)
+            {
+                HttpContext.RequestServices.GetRequiredService<ILogger<HomeController>>()
+                    .LogError(ex, "Failed to send magic link email to {Email}", email);
+                TempData["Flash"] = "danger|Could not send email. Contact an administrator.";
+            }
         }
+
+        return Redirect("/");
     }
 
-    // GET /schema
-    [HttpGet("/schema")]
-    public IActionResult Schema()
+    // GET /auth?token=...
+    [HttpGet("/auth")]
+    public IActionResult Auth(string token)
     {
-        var entities = DiscoverEntities()
-            .Values.Where(e => !e.IsView).OrderBy(e => e.DisplayName).ToList();
-        ViewBag.AllEntities = entities;
-        return View("Schema", entities);
+        if (string.IsNullOrEmpty(token)) return Redirect("/");
+
+        bool found;
+        (string Email, DateTime Expiry) entry;
+        lock (_tokenLock)
+        {
+            found = _tokens.TryGetValue(token, out entry);
+            if (found) _tokens.Remove(token);
+        }
+
+        if (!found || DateTime.UtcNow > entry.Expiry)
+        {
+            TempData["Flash"] = "danger|This login link is invalid or has expired.";
+            return Redirect("/");
+        }
+
+        HttpContext.Session.SetString("email", entry.Email);
+        return Redirect("/");
+    }
+
+    // GET /logout
+    [HttpGet("/logout")]
+    public IActionResult Logout()
+    {
+        HttpContext.Session.Clear();
+        return Redirect("/");
     }
 
     // POST /create_table
@@ -233,298 +265,23 @@ public class HomeController : Controller
         return View("Index");
     }
 
-    // GET /entity/{table}/create
-    [HttpGet("/entity/{table}/create")]
-    public IActionResult Create(string table)
+    // POST /drop_table/{table}
+    [HttpPost("/drop_table/{table}")]
+    public IActionResult DropTable(string table)
     {
-        var entities = DiscoverEntities();
-        if (!entities.TryGetValue(table, out var entity))
-            return Redirect("/");
-
-        using var conn = GetConnection();
-        var fkOptions = LoadFkOptions(conn, entity);
-
-        ViewBag.Entity = entity;
-        ViewBag.TableName = table.ToUpper();
-        ViewBag.FkOptions = fkOptions;
-        return View("Create");
-    }
-
-    // POST /entity/{table}/create
-    [HttpPost("/entity/{table}/create")]
-    public IActionResult CreatePost(string table)
-    {
-        var entities = DiscoverEntities();
-        if (!entities.TryGetValue(table, out var entity))
-            return Redirect("/");
-
-        using var conn = GetConnection();
         try
         {
-            var cols = entity.Columns;
-            var pkCols = entity.PkColumns;
-            var fields = new List<string>();
-            var placeholders = new List<string>();
-            var parms = new List<OracleParameter>();
-            int idx = 0;
-
-            foreach (var col in cols)
-            {
-                if (pkCols.Contains(col.ColumnName, StringComparer.OrdinalIgnoreCase) && col.IsIdentity)
-                    continue;
-
-                var val = Request.Form[col.ColumnName].FirstOrDefault()?.Trim() ?? "";
-                fields.Add($"\"{col.ColumnName}\"");
-                if (string.IsNullOrEmpty(val))
-                {
-                    placeholders.Add("NULL");
-                }
-                else
-                {
-                    var pName = $"p{idx++}";
-                    placeholders.Add($":{pName}");
-                    parms.Add(MakeTypedParam(pName, val, col));
-                }
-            }
-
-            if (pkCols.Count == 1 && cols.First(c => c.ColumnName == pkCols[0]).IsIdentity)
-            {
-                var retParm = new OracleParameter("retId", OracleDbType.Decimal, System.Data.ParameterDirection.Output);
-                var sql = $"INSERT INTO \"{table.ToUpper()}\" ({string.Join(", ", fields)}) VALUES ({string.Join(", ", placeholders)}) RETURNING \"{pkCols[0]}\" INTO :retId";
-                using var cmd = new OracleCommand(sql, conn);
-                cmd.BindByName = true;
-                foreach (var p in parms) cmd.Parameters.Add(p);
-                cmd.Parameters.Add(retParm);
-                cmd.ExecuteNonQuery();
-            }
-            else
-            {
-                Execute(conn, $"INSERT INTO \"{table.ToUpper()}\" ({string.Join(", ", fields)}) VALUES ({string.Join(", ", placeholders)})", parms.ToArray());
-            }
-
-            TempData["Flash"] = "success|Record created successfully.";
-            return Redirect($"/entity/{table.ToUpper()}");
-        }
-        catch (Exception ex)
-        {
-            TempData["Flash"] = $"danger|Error: {ex.Message}";
-            return Redirect($"/entity/{table.ToUpper()}/create");
-        }
-    }
-
-    // GET /entity/{table}/edit
-    [HttpGet("/entity/{table}/edit")]
-    public IActionResult Edit(string table)
-    {
-        var entities = DiscoverEntities();
-        if (!entities.TryGetValue(table, out var entity))
+            using var conn = GetConnection();
+            Execute(conn, $"DROP TABLE \"{table.ToUpper()}\" CASCADE CONSTRAINTS");
+            ClearAllCaches();
+            TempData["Flash"] = $"success|Table {table} dropped.";
             return Redirect("/");
-
-        using var conn = GetConnection();
-        var pkCols = entity.PkColumns;
-        var pkValues = pkCols.ToDictionary(pk => pk, pk => Request.Query[pk].FirstOrDefault() ?? "");
-
-        var whereParts = pkCols.Select((pk, i) => $"\"{pk}\" = :pk{i}").ToList();
-        var whereParms = pkCols.Select((pk, i) => new OracleParameter($"pk{i}", pkValues[pk])).ToArray();
-        var row = QueryOne(conn, $"SELECT * FROM \"{table.ToUpper()}\" WHERE {string.Join(" AND ", whereParts)}", whereParms);
-
-        if (row == null)
-        {
-            TempData["Flash"] = "danger|Record not found.";
-            return Redirect($"/entity/{table.ToUpper()}");
-        }
-
-        var fkOptions = LoadFkOptions(conn, entity);
-
-        ViewBag.Entity = entity;
-        ViewBag.TableName = table.ToUpper();
-        ViewBag.Row = row;
-        ViewBag.FkOptions = fkOptions;
-        return View("Edit");
-    }
-
-    // POST /entity/{table}/edit
-    [HttpPost("/entity/{table}/edit")]
-    public IActionResult EditPost(string table)
-    {
-        var entities = DiscoverEntities();
-        if (!entities.TryGetValue(table, out var entity))
-            return Redirect("/");
-
-        using var conn = GetConnection();
-        var pkCols = entity.PkColumns;
-        var pkValues = pkCols.ToDictionary(pk => pk, pk => Request.Form[pk].FirstOrDefault() ?? "");
-
-        try
-        {
-            var whereParts = pkCols.Select((pk, i) => $"\"{pk}\" = :pk{i}").ToList();
-
-            var sets = new List<string>();
-            var parms = new List<OracleParameter>();
-            int idx = 0;
-
-            foreach (var col in entity.Columns)
-            {
-                if (pkCols.Contains(col.ColumnName, StringComparer.OrdinalIgnoreCase))
-                    continue;
-                var val = Request.Form[col.ColumnName].FirstOrDefault()?.Trim() ?? "";
-                if (string.IsNullOrEmpty(val))
-                {
-                    sets.Add($"\"{col.ColumnName}\" = NULL");
-                }
-                else
-                {
-                    var pName = $"u{idx++}";
-                    sets.Add($"\"{col.ColumnName}\" = :{pName}");
-                    parms.Add(MakeTypedParam(pName, val, col));
-                }
-            }
-
-            for (int i = 0; i < pkCols.Count; i++)
-                parms.Add(new OracleParameter($"pk{i}", pkValues[pkCols[i]]));
-
-            Execute(conn,
-                $"UPDATE \"{table.ToUpper()}\" SET {string.Join(", ", sets)} WHERE {string.Join(" AND ", whereParts)}",
-                parms.ToArray());
-
-            TempData["Flash"] = "success|Record updated successfully.";
-            return Redirect($"/entity/{table.ToUpper()}");
         }
         catch (Exception ex)
         {
             TempData["Flash"] = $"danger|Error: {ex.Message}";
             return Redirect($"/entity/{table.ToUpper()}");
         }
-    }
-
-    // GET /entity/{table}/details
-    [HttpGet("/entity/{table}/details")]
-    public IActionResult Details(string table)
-    {
-        var entities = DiscoverEntities();
-        if (!entities.TryGetValue(table, out var entity))
-            return Redirect("/");
-
-        using var conn = GetConnection();
-        var pkCols = entity.PkColumns;
-        var pkValues = pkCols.ToDictionary(pk => pk, pk => Request.Query[pk].FirstOrDefault() ?? "");
-        var cols = entity.Columns;
-        var fkCols = cols.Where(c => c.IsFk).ToList();
-
-        var selectParts = cols.Select(c => $"\"{table.ToUpper()}\".\"{c.ColumnName}\"").ToList();
-        var joinParts = new List<string>();
-        var fkDisplay = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        var fkLinks = new Dictionary<string, (string refTable, string refPk, bool isView)>(StringComparer.OrdinalIgnoreCase);
-
-        foreach (var fk in fkCols)
-        {
-            var alias = "FK_" + fk.ColumnName;
-            var refTable = fk.FkRefTable!.ToUpper();
-            var displayCol = fk.FkDisplayCol ?? "NAME";
-            var navName = fk.FkNavName ?? SplitPascal(fk.FkRefTable!);
-            selectParts.Add($"\"{alias}\".\"{displayCol}\" AS \"{navName}\"");
-            joinParts.Add($"LEFT JOIN \"{refTable}\" \"{alias}\" ON \"{table.ToUpper()}\".\"{fk.ColumnName}\" = \"{alias}\".\"{fk.FkRefPk}\"");
-            fkDisplay[fk.ColumnName] = navName;
-            var isView = entities.TryGetValue(refTable, out var refEntity) && refEntity.IsView;
-            fkLinks[fk.ColumnName] = (refTable, fk.FkRefPk ?? "ID", isView);
-        }
-
-        var whereParts = pkCols.Select((pk, i) => $"\"{table.ToUpper()}\".\"{pk}\" = :pk{i}").ToList();
-        var whereParms = pkCols.Select((pk, i) => new OracleParameter($"pk{i}", pkValues[pk])).ToArray();
-
-        var row = QueryOne(conn,
-            $"SELECT {string.Join(", ", selectParts)} FROM \"{table.ToUpper()}\" {string.Join(" ", joinParts)} WHERE {string.Join(" AND ", whereParts)}",
-            whereParms);
-
-        if (row == null)
-        {
-            TempData["Flash"] = "danger|Record not found.";
-            return Redirect($"/entity/{table.ToUpper()}");
-        }
-
-        ViewBag.Entity = entity;
-        ViewBag.TableName = table.ToUpper();
-        ViewBag.Row = row;
-        ViewBag.FkDisplay = fkDisplay;
-        ViewBag.FkLinks = fkLinks;
-        return View("Details");
-    }
-
-    // GET /entity/{table}/delete
-    [HttpGet("/entity/{table}/delete")]
-    public IActionResult Delete(string table)
-    {
-        var entities = DiscoverEntities();
-        if (!entities.TryGetValue(table, out var entity))
-            return Redirect("/");
-
-        using var conn = GetConnection();
-        var pkCols = entity.PkColumns;
-        var pkValues = pkCols.ToDictionary(pk => pk, pk => Request.Query[pk].FirstOrDefault() ?? "");
-        var cols = entity.Columns;
-        var fkCols = cols.Where(c => c.IsFk).ToList();
-
-        var selectParts = cols.Select(c => $"\"{table.ToUpper()}\".\"{c.ColumnName}\"").ToList();
-        var joinParts = new List<string>();
-        var fkDisplay = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-
-        foreach (var fk in fkCols)
-        {
-            var alias = "FK_" + fk.ColumnName;
-            var refTable = fk.FkRefTable!.ToUpper();
-            var displayCol = fk.FkDisplayCol ?? "NAME";
-            var navName = fk.FkNavName ?? SplitPascal(fk.FkRefTable!);
-            selectParts.Add($"\"{alias}\".\"{displayCol}\" AS \"{navName}\"");
-            joinParts.Add($"LEFT JOIN \"{refTable}\" \"{alias}\" ON \"{table.ToUpper()}\".\"{fk.ColumnName}\" = \"{alias}\".\"{fk.FkRefPk}\"");
-            fkDisplay[fk.ColumnName] = navName;
-        }
-
-        var whereParts = pkCols.Select((pk, i) => $"\"{table.ToUpper()}\".\"{pk}\" = :pk{i}").ToList();
-        var whereParms = pkCols.Select((pk, i) => new OracleParameter($"pk{i}", pkValues[pk])).ToArray();
-
-        var row = QueryOne(conn,
-            $"SELECT {string.Join(", ", selectParts)} FROM \"{table.ToUpper()}\" {string.Join(" ", joinParts)} WHERE {string.Join(" AND ", whereParts)}",
-            whereParms);
-
-        if (row == null)
-        {
-            TempData["Flash"] = "danger|Record not found.";
-            return Redirect($"/entity/{table.ToUpper()}");
-        }
-
-        ViewBag.Entity = entity;
-        ViewBag.TableName = table.ToUpper();
-        ViewBag.Row = row;
-        ViewBag.FkDisplay = fkDisplay;
-        ViewBag.PkValues = pkValues;
-        return View("Delete");
-    }
-
-    // POST /entity/{table}/delete
-    [HttpPost("/entity/{table}/delete")]
-    public IActionResult DeletePost(string table)
-    {
-        var entities = DiscoverEntities();
-        if (!entities.TryGetValue(table, out var entity))
-            return Redirect("/");
-
-        using var conn = GetConnection();
-        var pkCols = entity.PkColumns;
-        var pkValues = pkCols.ToDictionary(pk => pk, pk => Request.Form[pk].FirstOrDefault() ?? "");
-
-        try
-        {
-            var whereParts = pkCols.Select((pk, i) => $"\"{pk}\" = :pk{i}").ToList();
-            var whereParms = pkCols.Select((pk, i) => new OracleParameter($"pk{i}", pkValues[pk])).ToArray();
-            Execute(conn, $"DELETE FROM \"{table.ToUpper()}\" WHERE {string.Join(" AND ", whereParts)}", whereParms);
-
-            TempData["Flash"] = "success|Record deleted successfully.";
-        }
-        catch (Exception ex)
-        {
-            TempData["Flash"] = $"danger|Cannot delete: {ex.Message}";
-        }
-        return Redirect($"/entity/{table.ToUpper()}");
     }
 
     // GET /entity/{table}/export
@@ -807,23 +564,298 @@ public class HomeController : Controller
         }
     }
 
-    // POST /drop_table/{table}
-    [HttpPost("/drop_table/{table}")]
-    public IActionResult DropTable(string table)
+    // GET /entity/{table}/create
+    [HttpGet("/entity/{table}/create")]
+    public IActionResult Create(string table)
     {
+        var entities = DiscoverEntities();
+        if (!entities.TryGetValue(table, out var entity))
+            return Redirect("/");
+
+        using var conn = GetConnection();
+        var fkOptions = LoadFkOptions(conn, entity);
+
+        ViewBag.Entity = entity;
+        ViewBag.TableName = table.ToUpper();
+        ViewBag.FkOptions = fkOptions;
+        return View("Create");
+    }
+
+    // POST /entity/{table}/create
+    [HttpPost("/entity/{table}/create")]
+    public IActionResult CreatePost(string table)
+    {
+        var entities = DiscoverEntities();
+        if (!entities.TryGetValue(table, out var entity))
+            return Redirect("/");
+
+        using var conn = GetConnection();
         try
         {
-            using var conn = GetConnection();
-            Execute(conn, $"DROP TABLE \"{table.ToUpper()}\" CASCADE CONSTRAINTS");
-            ClearAllCaches();
-            TempData["Flash"] = $"success|Table {table} dropped.";
+            var cols = entity.Columns;
+            var pkCols = entity.PkColumns;
+            var fields = new List<string>();
+            var placeholders = new List<string>();
+            var parms = new List<OracleParameter>();
+            int idx = 0;
+
+            foreach (var col in cols)
+            {
+                if (pkCols.Contains(col.ColumnName, StringComparer.OrdinalIgnoreCase) && col.IsIdentity)
+                    continue;
+
+                var val = Request.Form[col.ColumnName].FirstOrDefault()?.Trim() ?? "";
+                fields.Add($"\"{col.ColumnName}\"");
+                if (string.IsNullOrEmpty(val))
+                {
+                    placeholders.Add("NULL");
+                }
+                else
+                {
+                    var pName = $"p{idx++}";
+                    placeholders.Add($":{pName}");
+                    parms.Add(MakeTypedParam(pName, val, col));
+                }
+            }
+
+            if (pkCols.Count == 1 && cols.First(c => c.ColumnName == pkCols[0]).IsIdentity)
+            {
+                var retParm = new OracleParameter("retId", OracleDbType.Decimal, System.Data.ParameterDirection.Output);
+                var sql = $"INSERT INTO \"{table.ToUpper()}\" ({string.Join(", ", fields)}) VALUES ({string.Join(", ", placeholders)}) RETURNING \"{pkCols[0]}\" INTO :retId";
+                using var cmd = new OracleCommand(sql, conn);
+                cmd.BindByName = true;
+                foreach (var p in parms) cmd.Parameters.Add(p);
+                cmd.Parameters.Add(retParm);
+                cmd.ExecuteNonQuery();
+            }
+            else
+            {
+                Execute(conn, $"INSERT INTO \"{table.ToUpper()}\" ({string.Join(", ", fields)}) VALUES ({string.Join(", ", placeholders)})", parms.ToArray());
+            }
+
+            TempData["Flash"] = "success|Record created successfully.";
+            return Redirect($"/entity/{table.ToUpper()}");
+        }
+        catch (Exception ex)
+        {
+            TempData["Flash"] = $"danger|Error: {ex.Message}";
+            return Redirect($"/entity/{table.ToUpper()}/create");
+        }
+    }
+
+    // GET /entity/{table}/edit
+    [HttpGet("/entity/{table}/edit")]
+    public IActionResult Edit(string table)
+    {
+        var entities = DiscoverEntities();
+        if (!entities.TryGetValue(table, out var entity))
             return Redirect("/");
+
+        using var conn = GetConnection();
+        var pkCols = entity.PkColumns;
+        var pkValues = pkCols.ToDictionary(pk => pk, pk => Request.Query[pk].FirstOrDefault() ?? "");
+
+        var whereParts = pkCols.Select((pk, i) => $"\"{pk}\" = :pk{i}").ToList();
+        var whereParms = pkCols.Select((pk, i) => new OracleParameter($"pk{i}", pkValues[pk])).ToArray();
+        var row = QueryOne(conn, $"SELECT * FROM \"{table.ToUpper()}\" WHERE {string.Join(" AND ", whereParts)}", whereParms);
+
+        if (row == null)
+        {
+            TempData["Flash"] = "danger|Record not found.";
+            return Redirect($"/entity/{table.ToUpper()}");
+        }
+
+        var fkOptions = LoadFkOptions(conn, entity);
+
+        ViewBag.Entity = entity;
+        ViewBag.TableName = table.ToUpper();
+        ViewBag.Row = row;
+        ViewBag.FkOptions = fkOptions;
+        return View("Edit");
+    }
+
+    // POST /entity/{table}/edit
+    [HttpPost("/entity/{table}/edit")]
+    public IActionResult EditPost(string table)
+    {
+        var entities = DiscoverEntities();
+        if (!entities.TryGetValue(table, out var entity))
+            return Redirect("/");
+
+        using var conn = GetConnection();
+        var pkCols = entity.PkColumns;
+        var pkValues = pkCols.ToDictionary(pk => pk, pk => Request.Form[pk].FirstOrDefault() ?? "");
+
+        try
+        {
+            var whereParts = pkCols.Select((pk, i) => $"\"{pk}\" = :pk{i}").ToList();
+
+            var sets = new List<string>();
+            var parms = new List<OracleParameter>();
+            int idx = 0;
+
+            foreach (var col in entity.Columns)
+            {
+                if (pkCols.Contains(col.ColumnName, StringComparer.OrdinalIgnoreCase))
+                    continue;
+                var val = Request.Form[col.ColumnName].FirstOrDefault()?.Trim() ?? "";
+                if (string.IsNullOrEmpty(val))
+                {
+                    sets.Add($"\"{col.ColumnName}\" = NULL");
+                }
+                else
+                {
+                    var pName = $"u{idx++}";
+                    sets.Add($"\"{col.ColumnName}\" = :{pName}");
+                    parms.Add(MakeTypedParam(pName, val, col));
+                }
+            }
+
+            for (int i = 0; i < pkCols.Count; i++)
+                parms.Add(new OracleParameter($"pk{i}", pkValues[pkCols[i]]));
+
+            Execute(conn,
+                $"UPDATE \"{table.ToUpper()}\" SET {string.Join(", ", sets)} WHERE {string.Join(" AND ", whereParts)}",
+                parms.ToArray());
+
+            TempData["Flash"] = "success|Record updated successfully.";
+            return Redirect($"/entity/{table.ToUpper()}");
         }
         catch (Exception ex)
         {
             TempData["Flash"] = $"danger|Error: {ex.Message}";
             return Redirect($"/entity/{table.ToUpper()}");
         }
+    }
+
+    // GET /entity/{table}/delete
+    [HttpGet("/entity/{table}/delete")]
+    public IActionResult Delete(string table)
+    {
+        var entities = DiscoverEntities();
+        if (!entities.TryGetValue(table, out var entity))
+            return Redirect("/");
+
+        using var conn = GetConnection();
+        var pkCols = entity.PkColumns;
+        var pkValues = pkCols.ToDictionary(pk => pk, pk => Request.Query[pk].FirstOrDefault() ?? "");
+        var cols = entity.Columns;
+        var fkCols = cols.Where(c => c.IsFk).ToList();
+
+        var selectParts = cols.Select(c => $"\"{table.ToUpper()}\".\"{c.ColumnName}\"").ToList();
+        var joinParts = new List<string>();
+        var fkDisplay = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var fk in fkCols)
+        {
+            var alias = "FK_" + fk.ColumnName;
+            var refTable = fk.FkRefTable!.ToUpper();
+            var displayCol = fk.FkDisplayCol ?? "NAME";
+            var navName = fk.FkNavName ?? SplitPascal(fk.FkRefTable!);
+            selectParts.Add($"\"{alias}\".\"{displayCol}\" AS \"{navName}\"");
+            joinParts.Add($"LEFT JOIN \"{refTable}\" \"{alias}\" ON \"{table.ToUpper()}\".\"{fk.ColumnName}\" = \"{alias}\".\"{fk.FkRefPk}\"");
+            fkDisplay[fk.ColumnName] = navName;
+        }
+
+        var whereParts = pkCols.Select((pk, i) => $"\"{table.ToUpper()}\".\"{pk}\" = :pk{i}").ToList();
+        var whereParms = pkCols.Select((pk, i) => new OracleParameter($"pk{i}", pkValues[pk])).ToArray();
+
+        var row = QueryOne(conn,
+            $"SELECT {string.Join(", ", selectParts)} FROM \"{table.ToUpper()}\" {string.Join(" ", joinParts)} WHERE {string.Join(" AND ", whereParts)}",
+            whereParms);
+
+        if (row == null)
+        {
+            TempData["Flash"] = "danger|Record not found.";
+            return Redirect($"/entity/{table.ToUpper()}");
+        }
+
+        ViewBag.Entity = entity;
+        ViewBag.TableName = table.ToUpper();
+        ViewBag.Row = row;
+        ViewBag.FkDisplay = fkDisplay;
+        ViewBag.PkValues = pkValues;
+        return View("Delete");
+    }
+
+    // POST /entity/{table}/delete
+    [HttpPost("/entity/{table}/delete")]
+    public IActionResult DeletePost(string table)
+    {
+        var entities = DiscoverEntities();
+        if (!entities.TryGetValue(table, out var entity))
+            return Redirect("/");
+
+        using var conn = GetConnection();
+        var pkCols = entity.PkColumns;
+        var pkValues = pkCols.ToDictionary(pk => pk, pk => Request.Form[pk].FirstOrDefault() ?? "");
+
+        try
+        {
+            var whereParts = pkCols.Select((pk, i) => $"\"{pk}\" = :pk{i}").ToList();
+            var whereParms = pkCols.Select((pk, i) => new OracleParameter($"pk{i}", pkValues[pk])).ToArray();
+            Execute(conn, $"DELETE FROM \"{table.ToUpper()}\" WHERE {string.Join(" AND ", whereParts)}", whereParms);
+
+            TempData["Flash"] = "success|Record deleted successfully.";
+        }
+        catch (Exception ex)
+        {
+            TempData["Flash"] = $"danger|Cannot delete: {ex.Message}";
+        }
+        return Redirect($"/entity/{table.ToUpper()}");
+    }
+
+    // GET /entity/{table}/details
+    [HttpGet("/entity/{table}/details")]
+    public IActionResult Details(string table)
+    {
+        var entities = DiscoverEntities();
+        if (!entities.TryGetValue(table, out var entity))
+            return Redirect("/");
+
+        using var conn = GetConnection();
+        var pkCols = entity.PkColumns;
+        var pkValues = pkCols.ToDictionary(pk => pk, pk => Request.Query[pk].FirstOrDefault() ?? "");
+        var cols = entity.Columns;
+        var fkCols = cols.Where(c => c.IsFk).ToList();
+
+        var selectParts = cols.Select(c => $"\"{table.ToUpper()}\".\"{c.ColumnName}\"").ToList();
+        var joinParts = new List<string>();
+        var fkDisplay = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var fkLinks = new Dictionary<string, (string refTable, string refPk, bool isView)>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var fk in fkCols)
+        {
+            var alias = "FK_" + fk.ColumnName;
+            var refTable = fk.FkRefTable!.ToUpper();
+            var displayCol = fk.FkDisplayCol ?? "NAME";
+            var navName = fk.FkNavName ?? SplitPascal(fk.FkRefTable!);
+            selectParts.Add($"\"{alias}\".\"{displayCol}\" AS \"{navName}\"");
+            joinParts.Add($"LEFT JOIN \"{refTable}\" \"{alias}\" ON \"{table.ToUpper()}\".\"{fk.ColumnName}\" = \"{alias}\".\"{fk.FkRefPk}\"");
+            fkDisplay[fk.ColumnName] = navName;
+            var isView = entities.TryGetValue(refTable, out var refEntity) && refEntity.IsView;
+            fkLinks[fk.ColumnName] = (refTable, fk.FkRefPk ?? "ID", isView);
+        }
+
+        var whereParts = pkCols.Select((pk, i) => $"\"{table.ToUpper()}\".\"{pk}\" = :pk{i}").ToList();
+        var whereParms = pkCols.Select((pk, i) => new OracleParameter($"pk{i}", pkValues[pk])).ToArray();
+
+        var row = QueryOne(conn,
+            $"SELECT {string.Join(", ", selectParts)} FROM \"{table.ToUpper()}\" {string.Join(" ", joinParts)} WHERE {string.Join(" AND ", whereParts)}",
+            whereParms);
+
+        if (row == null)
+        {
+            TempData["Flash"] = "danger|Record not found.";
+            return Redirect($"/entity/{table.ToUpper()}");
+        }
+
+        ViewBag.Entity = entity;
+        ViewBag.TableName = table.ToUpper();
+        ViewBag.Row = row;
+        ViewBag.FkDisplay = fkDisplay;
+        ViewBag.FkLinks = fkLinks;
+        return View("Details");
     }
 
     // POST /add_column/{table}
@@ -890,6 +922,16 @@ public class HomeController : Controller
             TempData["Flash"] = $"danger|Error: {ex.Message}";
         }
         return Redirect(returnUrl);
+    }
+
+    // GET /schema
+    [HttpGet("/schema")]
+    public IActionResult Schema()
+    {
+        var entities = DiscoverEntities()
+            .Values.Where(e => !e.IsView).OrderBy(e => e.DisplayName).ToList();
+        ViewBag.AllEntities = entities;
+        return View("Schema", entities);
     }
 
     // POST /drop_column/{table}
@@ -973,218 +1015,30 @@ public class HomeController : Controller
         return Redirect("/schema");
     }
 
-    private void ClearAllCaches()
+    // GET /
+    [HttpGet("/")]
+    public IActionResult Home()
     {
-        ClearCache();
-        lock (_syncLock) { _syncCache.Clear(); }
+        var email = HttpContext.Session.GetString("email");
+        ViewBag.UserEmail = email;
+        if (email == null)
+            return View("Home", new List<Cmdb.Services.EntityMeta>());
+
+        try
+        {
+            ClearCache();
+            var entities = DiscoverEntities()
+                .Values.OrderBy(e => e.DisplayName).ToList();
+            return View("Home", entities);
+        }
+        catch (Exception ex)
+        {
+            TempData["Flash"] = $"danger|Error loading entities: {ex.Message}";
+            return View("Home", new List<Cmdb.Services.EntityMeta>());
+        }
     }
-
-
 
     // --- Helpers ---
-
-    private static OracleParameter MakeTypedParam(string name, string val, Cmdb.Services.ColumnMeta col)
-    {
-        var dt = col.DataType.ToUpper();
-        if (dt.Contains("DATE") || dt.Contains("TIMESTAMP"))
-        {
-            if (DateTime.TryParse(val, CultureInfo.InvariantCulture, DateTimeStyles.None, out var d))
-                return new OracleParameter(name, OracleDbType.Date) { Value = d };
-        }
-        return new OracleParameter(name, val);
-    }
-
-    private Dictionary<string, List<Dictionary<string, object?>>> LoadFkOptions(OracleConnection conn, Cmdb.Services.EntityMeta entity)
-    {
-        var fkOptions = new Dictionary<string, List<Dictionary<string, object?>>>(StringComparer.OrdinalIgnoreCase);
-        foreach (var col in entity.Columns.Where(c => c.IsFk))
-        {
-            var refTable = col.FkRefTable!.ToUpper();
-            var displayCol = col.FkDisplayCol ?? "NAME";
-            fkOptions[col.ColumnName] = Query(conn,
-                $"SELECT \"{col.FkRefPk}\" AS PK, \"{displayCol}\" AS DISPLAY FROM \"{refTable}\" ORDER BY \"{displayCol}\"");
-        }
-        return fkOptions;
-    }
-
-    private void InsertCsvRow(OracleConnection conn, string table, Cmdb.Services.EntityMeta entity, List<string> headers, List<string> values)
-    {
-        var fields = new List<string>();
-        var placeholders = new List<string>();
-        var parms = new List<OracleParameter>();
-        int idx = 0;
-
-        for (int j = 0; j < headers.Count && j < values.Count; j++)
-        {
-            var h = headers[j].ToUpper();
-            if (h == "ID") continue;
-            if (entity.PkColumns.Contains(h, StringComparer.OrdinalIgnoreCase)
-                && entity.Columns.FirstOrDefault(c => c.ColumnName == h)?.IsIdentity == true)
-                continue;
-
-            fields.Add($"\"{h}\"");
-            if (string.IsNullOrEmpty(values[j]))
-            {
-                placeholders.Add("NULL");
-            }
-            else
-            {
-                var pName = $"csv{idx++}";
-                placeholders.Add($":{pName}");
-                var colMeta = entity.Columns.FirstOrDefault(c => c.ColumnName.Equals(h, StringComparison.OrdinalIgnoreCase));
-                if (colMeta != null)
-                    parms.Add(MakeTypedParam(pName, values[j], colMeta));
-                else
-                    parms.Add(new OracleParameter(pName, values[j]));
-            }
-        }
-
-        if (fields.Count > 0)
-            Execute(conn,
-                $"INSERT INTO \"{table.ToUpper()}\" ({string.Join(", ", fields)}) VALUES ({string.Join(", ", placeholders)})",
-                parms.ToArray());
-    }
-
-    private static string CsvEscape(string val)
-    {
-        if (val.Contains(',') || val.Contains('"') || val.Contains('\n'))
-            return "\"" + val.Replace("\"", "\"\"") + "\"";
-        return val;
-    }
-
-    private static List<string> ParseCsvLine(string line)
-    {
-        var result = new List<string>();
-        bool inQuotes = false;
-        var current = new StringBuilder();
-
-        for (int i = 0; i < line.Length; i++)
-        {
-            if (inQuotes)
-            {
-                if (line[i] == '"')
-                {
-                    if (i + 1 < line.Length && line[i + 1] == '"')
-                    {
-                        current.Append('"');
-                        i++;
-                    }
-                    else
-                    {
-                        inQuotes = false;
-                    }
-                }
-                else
-                {
-                    current.Append(line[i]);
-                }
-            }
-            else
-            {
-                if (line[i] == '"') inQuotes = true;
-                else if (line[i] == ',')
-                {
-                    result.Add(current.ToString());
-                    current.Clear();
-                }
-                else current.Append(line[i]);
-            }
-        }
-        result.Add(current.ToString());
-        return result;
-    }
-
-    // POST /login
-    [HttpPost("/login")]
-    public async Task<IActionResult> Login()
-    {
-        var email = Request.Form["email"].FirstOrDefault()?.Trim() ?? "";
-        if (string.IsNullOrEmpty(email))
-            return Redirect("/");
-
-        var token = Guid.NewGuid().ToString("N");
-        lock (_tokenLock) { _tokens[token] = (email, DateTime.UtcNow.AddMinutes(15)); }
-
-        var link = $"{Request.Scheme}://{Request.Host}/auth?token={token}";
-        HttpContext.RequestServices.GetRequiredService<ILogger<HomeController>>()
-            .LogInformation("Magic link for {Email}: {Link}", email, link);
-
-        if (Request.Host.Host is "localhost" or "127.0.0.1" or "::1")
-        {
-            TempData["MagicLink"] = link;
-        }
-        else
-        {
-            try { await SendMagicLinkEmail(email, link); TempData["Flash"] = "success|Check your email for the login link."; }
-            catch (Exception ex)
-            {
-                HttpContext.RequestServices.GetRequiredService<ILogger<HomeController>>()
-                    .LogError(ex, "Failed to send magic link email to {Email}", email);
-                TempData["Flash"] = "danger|Could not send email. Contact an administrator.";
-            }
-        }
-
-        return Redirect("/");
-    }
-
-    // GET /auth?token=...
-    [HttpGet("/auth")]
-    public IActionResult Auth(string token)
-    {
-        if (string.IsNullOrEmpty(token)) return Redirect("/");
-
-        bool found;
-        (string Email, DateTime Expiry) entry;
-        lock (_tokenLock)
-        {
-            found = _tokens.TryGetValue(token, out entry);
-            if (found) _tokens.Remove(token);
-        }
-
-        if (!found || DateTime.UtcNow > entry.Expiry)
-        {
-            TempData["Flash"] = "danger|This login link is invalid or has expired.";
-            return Redirect("/");
-        }
-
-        HttpContext.Session.SetString("email", entry.Email);
-        return Redirect("/");
-    }
-
-    // GET /logout
-    [HttpGet("/logout")]
-    public IActionResult Logout()
-    {
-        HttpContext.Session.Clear();
-        return Redirect("/");
-    }
-
-    private async Task SendMagicLinkEmail(string to, string link)
-    {
-        var smtp = _config.GetSection("Smtp");
-        var host = smtp["Host"] ?? throw new InvalidOperationException("Smtp:Host not configured");
-        var port = smtp.GetValue("Port", 587);
-        var user = smtp["User"];
-        var pass = smtp["Password"];
-        var from = smtp["From"] ?? user ?? "no-reply@localhost";
-
-        using var client = new SmtpClient(host, port)
-        {
-            EnableSsl = true,
-            Credentials = !string.IsNullOrEmpty(user) ? new NetworkCredential(user, pass) : null
-        };
-
-        using var msg = new MailMessage(from, to)
-        {
-            Subject = "Your CMDB login link",
-            Body = $"<p>Click the link below to sign in to CMDB. This link expires in 15 minutes.</p><p><a href=\"{link}\">{link}</a></p>",
-            IsBodyHtml = true,
-        };
-
-        await client.SendMailAsync(msg);
-    }
-
-    // --- SchemaService methods merged in as private ---
 
     private OracleConnection GetConnection()
     {
@@ -1200,6 +1054,12 @@ public class HomeController : Controller
     private void ClearCache()
     {
         lock (_lock) { _cache = null; }
+    }
+
+    private void ClearAllCaches()
+    {
+        ClearCache();
+        lock (_syncLock) { _syncCache.Clear(); }
     }
 
     private Dictionary<string, Cmdb.Services.EntityMeta> DiscoverEntities()
@@ -1373,23 +1233,6 @@ public class HomeController : Controller
         }
     }
 
-    private static List<Dictionary<string, object?>> RunQuery(OracleConnection conn, string sql, OracleParameter[] parms)
-    {
-        using var cmd = new OracleCommand(sql, conn);
-        cmd.BindByName = true;
-        foreach (var p in parms) cmd.Parameters.Add(new OracleParameter(p.ParameterName, p.Value));
-        using var rdr = cmd.ExecuteReader();
-        var results = new List<Dictionary<string, object?>>();
-        while (rdr.Read())
-        {
-            var row = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
-            for (int i = 0; i < rdr.FieldCount; i++)
-                row[rdr.GetName(i)] = rdr.IsDBNull(i) ? null : rdr.GetValue(i);
-            results.Add(row);
-        }
-        return results;
-    }
-
     private Dictionary<string, object?>? QueryOne(OracleConnection conn, string sql, params OracleParameter[] parms)
     {
         var rows = Query(conn, sql, parms);
@@ -1413,14 +1256,6 @@ public class HomeController : Controller
         }
     }
 
-    private static int RunExecute(OracleConnection conn, string sql, OracleParameter[] parms)
-    {
-        using var cmd = new OracleCommand(sql, conn);
-        cmd.BindByName = true;
-        foreach (var p in parms) cmd.Parameters.Add(new OracleParameter(p.ParameterName, p.Value));
-        return cmd.ExecuteNonQuery();
-    }
-
     private object? ExecuteScalar(OracleConnection conn, string sql, params OracleParameter[] parms)
     {
         using var cmd = new OracleCommand(sql, conn);
@@ -1434,6 +1269,167 @@ public class HomeController : Controller
         name = name.Replace("_", " ");
         name = System.Text.RegularExpressions.Regex.Replace(name, @"(?<=[a-z])(?=[A-Z])", " ");
         return System.Globalization.CultureInfo.CurrentCulture.TextInfo.ToTitleCase(name.ToLower());
+    }
+
+    private static List<Dictionary<string, object?>> RunQuery(OracleConnection conn, string sql, OracleParameter[] parms)
+    {
+        using var cmd = new OracleCommand(sql, conn);
+        cmd.BindByName = true;
+        foreach (var p in parms) cmd.Parameters.Add(new OracleParameter(p.ParameterName, p.Value));
+        using var rdr = cmd.ExecuteReader();
+        var results = new List<Dictionary<string, object?>>();
+        while (rdr.Read())
+        {
+            var row = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+            for (int i = 0; i < rdr.FieldCount; i++)
+                row[rdr.GetName(i)] = rdr.IsDBNull(i) ? null : rdr.GetValue(i);
+            results.Add(row);
+        }
+        return results;
+    }
+
+    private static int RunExecute(OracleConnection conn, string sql, OracleParameter[] parms)
+    {
+        using var cmd = new OracleCommand(sql, conn);
+        cmd.BindByName = true;
+        foreach (var p in parms) cmd.Parameters.Add(new OracleParameter(p.ParameterName, p.Value));
+        return cmd.ExecuteNonQuery();
+    }
+
+    private Dictionary<string, List<Dictionary<string, object?>>> LoadFkOptions(OracleConnection conn, Cmdb.Services.EntityMeta entity)
+    {
+        var fkOptions = new Dictionary<string, List<Dictionary<string, object?>>>(StringComparer.OrdinalIgnoreCase);
+        foreach (var col in entity.Columns.Where(c => c.IsFk))
+        {
+            var refTable = col.FkRefTable!.ToUpper();
+            var displayCol = col.FkDisplayCol ?? "NAME";
+            fkOptions[col.ColumnName] = Query(conn,
+                $"SELECT \"{col.FkRefPk}\" AS PK, \"{displayCol}\" AS DISPLAY FROM \"{refTable}\" ORDER BY \"{displayCol}\"");
+        }
+        return fkOptions;
+    }
+
+    private static List<string> ParseCsvLine(string line)
+    {
+        var result = new List<string>();
+        bool inQuotes = false;
+        var current = new StringBuilder();
+
+        for (int i = 0; i < line.Length; i++)
+        {
+            if (inQuotes)
+            {
+                if (line[i] == '"')
+                {
+                    if (i + 1 < line.Length && line[i + 1] == '"')
+                    {
+                        current.Append('"');
+                        i++;
+                    }
+                    else
+                    {
+                        inQuotes = false;
+                    }
+                }
+                else
+                {
+                    current.Append(line[i]);
+                }
+            }
+            else
+            {
+                if (line[i] == '"') inQuotes = true;
+                else if (line[i] == ',')
+                {
+                    result.Add(current.ToString());
+                    current.Clear();
+                }
+                else current.Append(line[i]);
+            }
+        }
+        result.Add(current.ToString());
+        return result;
+    }
+
+    private static OracleParameter MakeTypedParam(string name, string val, Cmdb.Services.ColumnMeta col)
+    {
+        var dt = col.DataType.ToUpper();
+        if (dt.Contains("DATE") || dt.Contains("TIMESTAMP"))
+        {
+            if (DateTime.TryParse(val, CultureInfo.InvariantCulture, DateTimeStyles.None, out var d))
+                return new OracleParameter(name, OracleDbType.Date) { Value = d };
+        }
+        return new OracleParameter(name, val);
+    }
+
+    private void InsertCsvRow(OracleConnection conn, string table, Cmdb.Services.EntityMeta entity, List<string> headers, List<string> values)
+    {
+        var fields = new List<string>();
+        var placeholders = new List<string>();
+        var parms = new List<OracleParameter>();
+        int idx = 0;
+
+        for (int j = 0; j < headers.Count && j < values.Count; j++)
+        {
+            var h = headers[j].ToUpper();
+            if (h == "ID") continue;
+            if (entity.PkColumns.Contains(h, StringComparer.OrdinalIgnoreCase)
+                && entity.Columns.FirstOrDefault(c => c.ColumnName == h)?.IsIdentity == true)
+                continue;
+
+            fields.Add($"\"{h}\"");
+            if (string.IsNullOrEmpty(values[j]))
+            {
+                placeholders.Add("NULL");
+            }
+            else
+            {
+                var pName = $"csv{idx++}";
+                placeholders.Add($":{pName}");
+                var colMeta = entity.Columns.FirstOrDefault(c => c.ColumnName.Equals(h, StringComparison.OrdinalIgnoreCase));
+                if (colMeta != null)
+                    parms.Add(MakeTypedParam(pName, values[j], colMeta));
+                else
+                    parms.Add(new OracleParameter(pName, values[j]));
+            }
+        }
+
+        if (fields.Count > 0)
+            Execute(conn,
+                $"INSERT INTO \"{table.ToUpper()}\" ({string.Join(", ", fields)}) VALUES ({string.Join(", ", placeholders)})",
+                parms.ToArray());
+    }
+
+    private static string CsvEscape(string val)
+    {
+        if (val.Contains(',') || val.Contains('"') || val.Contains('\n'))
+            return "\"" + val.Replace("\"", "\"\"") + "\"";
+        return val;
+    }
+
+    private async Task SendMagicLinkEmail(string to, string link)
+    {
+        var smtp = _config.GetSection("Smtp");
+        var host = smtp["Host"] ?? throw new InvalidOperationException("Smtp:Host not configured");
+        var port = smtp.GetValue("Port", 587);
+        var user = smtp["User"];
+        var pass = smtp["Password"];
+        var from = smtp["From"] ?? user ?? "no-reply@localhost";
+
+        using var client = new SmtpClient(host, port)
+        {
+            EnableSsl = true,
+            Credentials = !string.IsNullOrEmpty(user) ? new NetworkCredential(user, pass) : null
+        };
+
+        using var msg = new MailMessage(from, to)
+        {
+            Subject = "Your CMDB login link",
+            Body = $"<p>Click the link below to sign in to CMDB. This link expires in 15 minutes.</p><p><a href=\"{link}\">{link}</a></p>",
+            IsBodyHtml = true,
+        };
+
+        await client.SendMailAsync(msg);
     }
 }
 
