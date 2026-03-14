@@ -1,10 +1,10 @@
+using System.Data;
 using System.Globalization;
 using System.Net;
 using System.Net.Http;
 using System.Net.Mail;
 using System.Text;
 using System.Text.Json;
-using Cmdb.Services;
 using Microsoft.AspNetCore.Mvc;
 using Oracle.ManagedDataAccess.Client;
 
@@ -12,7 +12,6 @@ namespace Cmdb.Controllers;
 
 public class HomeController : Controller
 {
-    private readonly SchemaService _schema;
     private readonly IHttpClientFactory _httpFactory;
     private readonly IConfiguration _config;
     private readonly string? _syncBaseUrl;
@@ -22,12 +21,19 @@ public class HomeController : Controller
     private static readonly object _tokenLock = new();
     private const int PageSize = 10;
 
-    public HomeController(SchemaService schema, IHttpClientFactory httpFactory, IConfiguration config)
+    // SchemaService fields merged in
+    private static Dictionary<string, Cmdb.Services.EntityMeta>? _cache;
+    private static readonly object _lock = new();
+    private static string? _connStr;
+
+    public HomeController(IHttpClientFactory httpFactory, IConfiguration config)
     {
-        _schema = schema;
         _httpFactory = httpFactory;
         _config = config;
         _syncBaseUrl = config["SyncBaseUrl"]?.TrimEnd('/');
+        if (_connStr == null)
+            _connStr = config.GetConnectionString("Oracle")
+                ?? "User Id=cmdb;Password=cmdb123;Data Source=localhost:1521/XEPDB1;";
     }
 
     // GET /
@@ -37,19 +43,19 @@ public class HomeController : Controller
         var email = HttpContext.Session.GetString("email");
         ViewBag.UserEmail = email;
         if (email == null)
-            return View("Home", new List<EntityMeta>());
+            return View("Home", new List<Cmdb.Services.EntityMeta>());
 
         try
         {
-            _schema.ClearCache();
-            var entities = _schema.DiscoverEntities()
+            ClearCache();
+            var entities = DiscoverEntities()
                 .Values.OrderBy(e => e.DisplayName).ToList();
             return View("Home", entities);
         }
         catch (Exception ex)
         {
             TempData["Flash"] = $"danger|Error loading entities: {ex.Message}";
-            return View("Home", new List<EntityMeta>());
+            return View("Home", new List<Cmdb.Services.EntityMeta>());
         }
     }
 
@@ -57,7 +63,7 @@ public class HomeController : Controller
     [HttpGet("/schema")]
     public IActionResult Schema()
     {
-        var entities = _schema.DiscoverEntities()
+        var entities = DiscoverEntities()
             .Values.Where(e => !e.IsView).OrderBy(e => e.DisplayName).ToList();
         ViewBag.AllEntities = entities;
         return View("Schema", entities);
@@ -78,8 +84,8 @@ public class HomeController : Controller
 
         try
         {
-            using var conn = _schema.GetConnection();
-            _schema.Execute(conn, $"CREATE TABLE \"{name}\" (ID NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY, NAME VARCHAR2(200))");
+            using var conn = GetConnection();
+            Execute(conn, $"CREATE TABLE \"{name}\" (ID NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY, NAME VARCHAR2(200))");
             ClearAllCaches();
             return Redirect($"/entity/{name}");
         }
@@ -94,7 +100,7 @@ public class HomeController : Controller
     [HttpGet("/entity/{table}")]
     public async Task<IActionResult> Index(string table, string? search, string? sort, string? dir, int page = 1)
     {
-        var entities = _schema.DiscoverEntities();
+        var entities = DiscoverEntities();
         if (!entities.TryGetValue(table, out var entity))
         {
             TempData["Flash"] = "danger|Unknown entity";
@@ -103,7 +109,7 @@ public class HomeController : Controller
 
         search = search?.Trim() ?? "";
         dir = dir ?? "asc";
-        using var conn = _schema.GetConnection();
+        using var conn = GetConnection();
 
         var cols = entity.Columns;
         var colNames = cols.Select(c => c.ColumnName).ToList();
@@ -120,7 +126,7 @@ public class HomeController : Controller
             var alias = "FK_" + fk.ColumnName;
             var refTable = fk.FkRefTable!.ToUpper();
             var displayCol = fk.FkDisplayCol ?? "NAME";
-            var navName = fk.FkNavName ?? SchemaService.SplitPascal(fk.FkRefTable!);
+            var navName = fk.FkNavName ?? SplitPascal(fk.FkRefTable!);
             selectParts.Add($"\"{alias}\".\"{displayCol}\" AS \"{navName}\"");
             joinParts.Add($"LEFT JOIN \"{refTable}\" \"{alias}\" ON \"{table.ToUpper()}\".\"{fk.ColumnName}\" = \"{alias}\".\"{fk.FkRefPk}\"");
             fkDisplayMap[fk.ColumnName] = (alias, displayCol, navName);
@@ -156,7 +162,7 @@ public class HomeController : Controller
         }
 
         // Count
-        var countRow = _schema.QueryOne(conn, $"SELECT COUNT(*) AS CNT {baseSql} {where}", parms.ToArray());
+        var countRow = QueryOne(conn, $"SELECT COUNT(*) AS CNT {baseSql} {where}", parms.ToArray());
         var total = Convert.ToInt32(countRow?["CNT"] ?? 0);
         var totalPages = Math.Max(1, (int)Math.Ceiling(total / (double)PageSize));
         page = Math.Clamp(page, 1, totalPages);
@@ -179,7 +185,7 @@ public class HomeController : Controller
         var rowParms = parms.Select(p => new OracleParameter(p.ParameterName, p.Value)).ToList();
         rowParms.Add(new OracleParameter("off", offset));
         rowParms.Add(new OracleParameter("lim", PageSize));
-        var rows = _schema.Query(conn,
+        var rows = Query(conn,
             $"SELECT {string.Join(", ", selectParts)} {baseSql} {where} {orderSql} OFFSET :off ROWS FETCH NEXT :lim ROWS ONLY",
             rowParms.ToArray());
 
@@ -201,7 +207,7 @@ public class HomeController : Controller
             {
                 displayColumns.Add(new DisplayColumn
                 {
-                    Name = SchemaService.SplitPascal(col.ColumnName),
+                    Name = SplitPascal(col.ColumnName),
                     SortKey = col.ColumnName,
                     IsFk = false,
                 });
@@ -231,11 +237,11 @@ public class HomeController : Controller
     [HttpGet("/entity/{table}/create")]
     public IActionResult Create(string table)
     {
-        var entities = _schema.DiscoverEntities();
+        var entities = DiscoverEntities();
         if (!entities.TryGetValue(table, out var entity))
             return Redirect("/");
 
-        using var conn = _schema.GetConnection();
+        using var conn = GetConnection();
         var fkOptions = LoadFkOptions(conn, entity);
 
         ViewBag.Entity = entity;
@@ -248,11 +254,11 @@ public class HomeController : Controller
     [HttpPost("/entity/{table}/create")]
     public IActionResult CreatePost(string table)
     {
-        var entities = _schema.DiscoverEntities();
+        var entities = DiscoverEntities();
         if (!entities.TryGetValue(table, out var entity))
             return Redirect("/");
 
-        using var conn = _schema.GetConnection();
+        using var conn = GetConnection();
         try
         {
             var cols = entity.Columns;
@@ -293,7 +299,7 @@ public class HomeController : Controller
             }
             else
             {
-                _schema.Execute(conn, $"INSERT INTO \"{table.ToUpper()}\" ({string.Join(", ", fields)}) VALUES ({string.Join(", ", placeholders)})", parms.ToArray());
+                Execute(conn, $"INSERT INTO \"{table.ToUpper()}\" ({string.Join(", ", fields)}) VALUES ({string.Join(", ", placeholders)})", parms.ToArray());
             }
 
             TempData["Flash"] = "success|Record created successfully.";
@@ -310,17 +316,17 @@ public class HomeController : Controller
     [HttpGet("/entity/{table}/edit")]
     public IActionResult Edit(string table)
     {
-        var entities = _schema.DiscoverEntities();
+        var entities = DiscoverEntities();
         if (!entities.TryGetValue(table, out var entity))
             return Redirect("/");
 
-        using var conn = _schema.GetConnection();
+        using var conn = GetConnection();
         var pkCols = entity.PkColumns;
         var pkValues = pkCols.ToDictionary(pk => pk, pk => Request.Query[pk].FirstOrDefault() ?? "");
 
         var whereParts = pkCols.Select((pk, i) => $"\"{pk}\" = :pk{i}").ToList();
         var whereParms = pkCols.Select((pk, i) => new OracleParameter($"pk{i}", pkValues[pk])).ToArray();
-        var row = _schema.QueryOne(conn, $"SELECT * FROM \"{table.ToUpper()}\" WHERE {string.Join(" AND ", whereParts)}", whereParms);
+        var row = QueryOne(conn, $"SELECT * FROM \"{table.ToUpper()}\" WHERE {string.Join(" AND ", whereParts)}", whereParms);
 
         if (row == null)
         {
@@ -341,11 +347,11 @@ public class HomeController : Controller
     [HttpPost("/entity/{table}/edit")]
     public IActionResult EditPost(string table)
     {
-        var entities = _schema.DiscoverEntities();
+        var entities = DiscoverEntities();
         if (!entities.TryGetValue(table, out var entity))
             return Redirect("/");
 
-        using var conn = _schema.GetConnection();
+        using var conn = GetConnection();
         var pkCols = entity.PkColumns;
         var pkValues = pkCols.ToDictionary(pk => pk, pk => Request.Form[pk].FirstOrDefault() ?? "");
 
@@ -377,7 +383,7 @@ public class HomeController : Controller
             for (int i = 0; i < pkCols.Count; i++)
                 parms.Add(new OracleParameter($"pk{i}", pkValues[pkCols[i]]));
 
-            _schema.Execute(conn,
+            Execute(conn,
                 $"UPDATE \"{table.ToUpper()}\" SET {string.Join(", ", sets)} WHERE {string.Join(" AND ", whereParts)}",
                 parms.ToArray());
 
@@ -395,11 +401,11 @@ public class HomeController : Controller
     [HttpGet("/entity/{table}/details")]
     public IActionResult Details(string table)
     {
-        var entities = _schema.DiscoverEntities();
+        var entities = DiscoverEntities();
         if (!entities.TryGetValue(table, out var entity))
             return Redirect("/");
 
-        using var conn = _schema.GetConnection();
+        using var conn = GetConnection();
         var pkCols = entity.PkColumns;
         var pkValues = pkCols.ToDictionary(pk => pk, pk => Request.Query[pk].FirstOrDefault() ?? "");
         var cols = entity.Columns;
@@ -415,7 +421,7 @@ public class HomeController : Controller
             var alias = "FK_" + fk.ColumnName;
             var refTable = fk.FkRefTable!.ToUpper();
             var displayCol = fk.FkDisplayCol ?? "NAME";
-            var navName = fk.FkNavName ?? SchemaService.SplitPascal(fk.FkRefTable!);
+            var navName = fk.FkNavName ?? SplitPascal(fk.FkRefTable!);
             selectParts.Add($"\"{alias}\".\"{displayCol}\" AS \"{navName}\"");
             joinParts.Add($"LEFT JOIN \"{refTable}\" \"{alias}\" ON \"{table.ToUpper()}\".\"{fk.ColumnName}\" = \"{alias}\".\"{fk.FkRefPk}\"");
             fkDisplay[fk.ColumnName] = navName;
@@ -426,7 +432,7 @@ public class HomeController : Controller
         var whereParts = pkCols.Select((pk, i) => $"\"{table.ToUpper()}\".\"{pk}\" = :pk{i}").ToList();
         var whereParms = pkCols.Select((pk, i) => new OracleParameter($"pk{i}", pkValues[pk])).ToArray();
 
-        var row = _schema.QueryOne(conn,
+        var row = QueryOne(conn,
             $"SELECT {string.Join(", ", selectParts)} FROM \"{table.ToUpper()}\" {string.Join(" ", joinParts)} WHERE {string.Join(" AND ", whereParts)}",
             whereParms);
 
@@ -448,11 +454,11 @@ public class HomeController : Controller
     [HttpGet("/entity/{table}/delete")]
     public IActionResult Delete(string table)
     {
-        var entities = _schema.DiscoverEntities();
+        var entities = DiscoverEntities();
         if (!entities.TryGetValue(table, out var entity))
             return Redirect("/");
 
-        using var conn = _schema.GetConnection();
+        using var conn = GetConnection();
         var pkCols = entity.PkColumns;
         var pkValues = pkCols.ToDictionary(pk => pk, pk => Request.Query[pk].FirstOrDefault() ?? "");
         var cols = entity.Columns;
@@ -467,7 +473,7 @@ public class HomeController : Controller
             var alias = "FK_" + fk.ColumnName;
             var refTable = fk.FkRefTable!.ToUpper();
             var displayCol = fk.FkDisplayCol ?? "NAME";
-            var navName = fk.FkNavName ?? SchemaService.SplitPascal(fk.FkRefTable!);
+            var navName = fk.FkNavName ?? SplitPascal(fk.FkRefTable!);
             selectParts.Add($"\"{alias}\".\"{displayCol}\" AS \"{navName}\"");
             joinParts.Add($"LEFT JOIN \"{refTable}\" \"{alias}\" ON \"{table.ToUpper()}\".\"{fk.ColumnName}\" = \"{alias}\".\"{fk.FkRefPk}\"");
             fkDisplay[fk.ColumnName] = navName;
@@ -476,7 +482,7 @@ public class HomeController : Controller
         var whereParts = pkCols.Select((pk, i) => $"\"{table.ToUpper()}\".\"{pk}\" = :pk{i}").ToList();
         var whereParms = pkCols.Select((pk, i) => new OracleParameter($"pk{i}", pkValues[pk])).ToArray();
 
-        var row = _schema.QueryOne(conn,
+        var row = QueryOne(conn,
             $"SELECT {string.Join(", ", selectParts)} FROM \"{table.ToUpper()}\" {string.Join(" ", joinParts)} WHERE {string.Join(" AND ", whereParts)}",
             whereParms);
 
@@ -498,11 +504,11 @@ public class HomeController : Controller
     [HttpPost("/entity/{table}/delete")]
     public IActionResult DeletePost(string table)
     {
-        var entities = _schema.DiscoverEntities();
+        var entities = DiscoverEntities();
         if (!entities.TryGetValue(table, out var entity))
             return Redirect("/");
 
-        using var conn = _schema.GetConnection();
+        using var conn = GetConnection();
         var pkCols = entity.PkColumns;
         var pkValues = pkCols.ToDictionary(pk => pk, pk => Request.Form[pk].FirstOrDefault() ?? "");
 
@@ -510,7 +516,7 @@ public class HomeController : Controller
         {
             var whereParts = pkCols.Select((pk, i) => $"\"{pk}\" = :pk{i}").ToList();
             var whereParms = pkCols.Select((pk, i) => new OracleParameter($"pk{i}", pkValues[pk])).ToArray();
-            _schema.Execute(conn, $"DELETE FROM \"{table.ToUpper()}\" WHERE {string.Join(" AND ", whereParts)}", whereParms);
+            Execute(conn, $"DELETE FROM \"{table.ToUpper()}\" WHERE {string.Join(" AND ", whereParts)}", whereParms);
 
             TempData["Flash"] = "success|Record deleted successfully.";
         }
@@ -525,12 +531,12 @@ public class HomeController : Controller
     [HttpGet("/entity/{table}/export")]
     public IActionResult Export(string table)
     {
-        var entities = _schema.DiscoverEntities();
+        var entities = DiscoverEntities();
         if (!entities.TryGetValue(table, out var entity))
             return Redirect("/");
 
-        using var conn = _schema.GetConnection();
-        var rows = _schema.Query(conn, $"SELECT * FROM \"{table.ToUpper()}\"");
+        using var conn = GetConnection();
+        var rows = Query(conn, $"SELECT * FROM \"{table.ToUpper()}\"");
 
         if (rows.Count == 0)
         {
@@ -551,7 +557,7 @@ public class HomeController : Controller
     [HttpPost("/entity/{table}/import")]
     public IActionResult Import(string table)
     {
-        var entities = _schema.DiscoverEntities();
+        var entities = DiscoverEntities();
         if (!entities.TryGetValue(table, out var entity))
             return Redirect("/");
 
@@ -576,7 +582,7 @@ public class HomeController : Controller
             }
 
             var headers = ParseCsvLine(lines[0]);
-            using var conn = _schema.GetConnection();
+            using var conn = GetConnection();
             int inserted = 0, updated = 0;
 
             var nameIdx = headers.FindIndex(h => h.Equals("NAME", StringComparison.OrdinalIgnoreCase));
@@ -589,7 +595,7 @@ public class HomeController : Controller
                 if (nameIdx >= 0 && nameIdx < values.Count)
                 {
                     var nameVal = values[nameIdx];
-                    var existing = _schema.QueryOne(conn,
+                    var existing = QueryOne(conn,
                         $"SELECT * FROM \"{table.ToUpper()}\" WHERE UPPER(\"NAME\") = UPPER(:n)",
                         new OracleParameter("n", nameVal));
 
@@ -615,7 +621,7 @@ public class HomeController : Controller
                         }
                         parms.Add(new OracleParameter("matchName", nameVal));
                         if (sets.Count > 0)
-                            _schema.Execute(conn, $"UPDATE \"{table.ToUpper()}\" SET {string.Join(", ", sets)} WHERE UPPER(\"NAME\") = UPPER(:matchName)", parms.ToArray());
+                            Execute(conn, $"UPDATE \"{table.ToUpper()}\" SET {string.Join(", ", sets)} WHERE UPPER(\"NAME\") = UPPER(:matchName)", parms.ToArray());
                         updated++;
                     }
                     else
@@ -645,7 +651,7 @@ public class HomeController : Controller
     [HttpPost("/entity/{table}/sync")]
     public async Task<IActionResult> Sync(string table)
     {
-        var entities = _schema.DiscoverEntities();
+        var entities = DiscoverEntities();
         if (!entities.TryGetValue(table, out var entity))
             return Redirect("/");
 
@@ -663,7 +669,7 @@ public class HomeController : Controller
             var json = await http.GetStringAsync(url);
             var data = JsonSerializer.Deserialize<JsonElement[]>(json) ?? Array.Empty<JsonElement>();
 
-            using var conn = _schema.GetConnection();
+            using var conn = GetConnection();
             var cols = entity.Columns;
             var pkCols = entity.PkColumns;
             int inserted = 0, updated = 0;
@@ -700,11 +706,11 @@ public class HomeController : Controller
                 {
                     var whereParts = pkCols.Select((pk, i) => $"\"{pk}\" = :pk{i}").ToList();
                     var whereParms = pkCols.Select((pk, i) => new OracleParameter($"pk{i}", mapped[pk])).ToArray();
-                    existing = _schema.QueryOne(conn, $"SELECT * FROM \"{table.ToUpper()}\" WHERE {string.Join(" AND ", whereParts)}", whereParms);
+                    existing = QueryOne(conn, $"SELECT * FROM \"{table.ToUpper()}\" WHERE {string.Join(" AND ", whereParts)}", whereParms);
                 }
                 else if (mapped.ContainsKey("NAME") && !string.IsNullOrEmpty(mapped["NAME"]))
                 {
-                    existing = _schema.QueryOne(conn, $"SELECT * FROM \"{table.ToUpper()}\" WHERE UPPER(\"NAME\") = UPPER(:n)",
+                    existing = QueryOne(conn, $"SELECT * FROM \"{table.ToUpper()}\" WHERE UPPER(\"NAME\") = UPPER(:n)",
                         new OracleParameter("n", mapped["NAME"]));
                 }
 
@@ -732,7 +738,7 @@ public class HomeController : Controller
                         for (int i = 0; i < pkCols.Count; i++)
                             parms.Add(new OracleParameter($"pk{i}", existing[pkCols[i]]));
                         var wParts = pkCols.Select((pk, i) => $"\"{pk}\" = :pk{i}").ToList();
-                        _schema.Execute(conn, $"UPDATE \"{table.ToUpper()}\" SET {string.Join(", ", sets)} WHERE {string.Join(" AND ", wParts)}", parms.ToArray());
+                        Execute(conn, $"UPDATE \"{table.ToUpper()}\" SET {string.Join(", ", sets)} WHERE {string.Join(" AND ", wParts)}", parms.ToArray());
                     }
                     updated++;
                 }
@@ -760,7 +766,7 @@ public class HomeController : Controller
                         }
                     }
                     if (fields.Count > 0)
-                        _schema.Execute(conn, $"INSERT INTO \"{table.ToUpper()}\" ({string.Join(", ", fields)}) VALUES ({string.Join(", ", placeholders)})", parms.ToArray());
+                        Execute(conn, $"INSERT INTO \"{table.ToUpper()}\" ({string.Join(", ", fields)}) VALUES ({string.Join(", ", placeholders)})", parms.ToArray());
                     inserted++;
                 }
             }
@@ -807,8 +813,8 @@ public class HomeController : Controller
     {
         try
         {
-            using var conn = _schema.GetConnection();
-            _schema.Execute(conn, $"DROP TABLE \"{table.ToUpper()}\" CASCADE CONSTRAINTS");
+            using var conn = GetConnection();
+            Execute(conn, $"DROP TABLE \"{table.ToUpper()}\" CASCADE CONSTRAINTS");
             ClearAllCaches();
             TempData["Flash"] = $"success|Table {table} dropped.";
             return Redirect("/");
@@ -836,8 +842,8 @@ public class HomeController : Controller
             var fkCol = $"{refTable}_ID";
             try
             {
-                using var conn = _schema.GetConnection();
-                _schema.Execute(conn, $"ALTER TABLE \"{table.ToUpper()}\" ADD \"{fkCol}\" NUMBER");
+                using var conn = GetConnection();
+                Execute(conn, $"ALTER TABLE \"{table.ToUpper()}\" ADD \"{fkCol}\" NUMBER");
                 ClearAllCaches();
                 TempData["Flash"] = $"success|Reference {fkCol} added.";
             }
@@ -862,7 +868,7 @@ public class HomeController : Controller
 
         try
         {
-            using var conn = _schema.GetConnection();
+            using var conn = GetConnection();
             var oraType = colType.ToUpper() switch
             {
                 "NUMBER" => "NUMBER",
@@ -871,7 +877,7 @@ public class HomeController : Controller
                 _ => "VARCHAR2(200)"
             };
             var nullClause = nullable ? "" : " NOT NULL";
-            _schema.Execute(conn, $"ALTER TABLE \"{table.ToUpper()}\" ADD \"{colName}\" {oraType}{nullClause}");
+            Execute(conn, $"ALTER TABLE \"{table.ToUpper()}\" ADD \"{colName}\" {oraType}{nullClause}");
             ClearAllCaches();
             TempData["Flash"] = $"success|Column {colName} added.";
         }
@@ -904,8 +910,8 @@ public class HomeController : Controller
 
         try
         {
-            using var conn = _schema.GetConnection();
-            _schema.Execute(conn, $"ALTER TABLE \"{table.ToUpper()}\" DROP COLUMN \"{colName}\"");
+            using var conn = GetConnection();
+            Execute(conn, $"ALTER TABLE \"{table.ToUpper()}\" DROP COLUMN \"{colName}\"");
             ClearAllCaches();
             TempData["Flash"] = $"success|Column {colName} dropped.";
         }
@@ -930,8 +936,8 @@ public class HomeController : Controller
         var colName = $"{refTable}_ID";
         try
         {
-            using var conn = _schema.GetConnection();
-            _schema.Execute(conn, $"ALTER TABLE \"{table.ToUpper()}\" ADD \"{colName}\" NUMBER");
+            using var conn = GetConnection();
+            Execute(conn, $"ALTER TABLE \"{table.ToUpper()}\" ADD \"{colName}\" NUMBER");
             ClearAllCaches();
             TempData["Flash"] = $"success|Reference {colName} added.";
         }
@@ -955,8 +961,8 @@ public class HomeController : Controller
 
         try
         {
-            using var conn = _schema.GetConnection();
-            _schema.Execute(conn, $"ALTER TABLE \"{table.ToUpper()}\" DROP COLUMN \"{colName}\"");
+            using var conn = GetConnection();
+            Execute(conn, $"ALTER TABLE \"{table.ToUpper()}\" DROP COLUMN \"{colName}\"");
             ClearAllCaches();
             TempData["Flash"] = $"success|Reference {colName} dropped.";
         }
@@ -969,7 +975,7 @@ public class HomeController : Controller
 
     private void ClearAllCaches()
     {
-        _schema.ClearCache();
+        ClearCache();
         lock (_syncLock) { _syncCache.Clear(); }
     }
 
@@ -977,7 +983,7 @@ public class HomeController : Controller
 
     // --- Helpers ---
 
-    private static OracleParameter MakeTypedParam(string name, string val, ColumnMeta col)
+    private static OracleParameter MakeTypedParam(string name, string val, Cmdb.Services.ColumnMeta col)
     {
         var dt = col.DataType.ToUpper();
         if (dt.Contains("DATE") || dt.Contains("TIMESTAMP"))
@@ -988,20 +994,20 @@ public class HomeController : Controller
         return new OracleParameter(name, val);
     }
 
-    private Dictionary<string, List<Dictionary<string, object?>>> LoadFkOptions(OracleConnection conn, EntityMeta entity)
+    private Dictionary<string, List<Dictionary<string, object?>>> LoadFkOptions(OracleConnection conn, Cmdb.Services.EntityMeta entity)
     {
         var fkOptions = new Dictionary<string, List<Dictionary<string, object?>>>(StringComparer.OrdinalIgnoreCase);
         foreach (var col in entity.Columns.Where(c => c.IsFk))
         {
             var refTable = col.FkRefTable!.ToUpper();
             var displayCol = col.FkDisplayCol ?? "NAME";
-            fkOptions[col.ColumnName] = _schema.Query(conn,
+            fkOptions[col.ColumnName] = Query(conn,
                 $"SELECT \"{col.FkRefPk}\" AS PK, \"{displayCol}\" AS DISPLAY FROM \"{refTable}\" ORDER BY \"{displayCol}\"");
         }
         return fkOptions;
     }
 
-    private void InsertCsvRow(OracleConnection conn, string table, EntityMeta entity, List<string> headers, List<string> values)
+    private void InsertCsvRow(OracleConnection conn, string table, Cmdb.Services.EntityMeta entity, List<string> headers, List<string> values)
     {
         var fields = new List<string>();
         var placeholders = new List<string>();
@@ -1034,7 +1040,7 @@ public class HomeController : Controller
         }
 
         if (fields.Count > 0)
-            _schema.Execute(conn,
+            Execute(conn,
                 $"INSERT INTO \"{table.ToUpper()}\" ({string.Join(", ", fields)}) VALUES ({string.Join(", ", placeholders)})",
                 parms.ToArray());
     }
@@ -1176,6 +1182,258 @@ public class HomeController : Controller
         };
 
         await client.SendMailAsync(msg);
+    }
+
+    // --- SchemaService methods merged in as private ---
+
+    private OracleConnection GetConnection()
+    {
+        var builder = new OracleConnectionStringBuilder(_connStr ?? "User Id=cmdb;Password=cmdb123;Data Source=localhost:1521/XEPDB1;")
+        {
+            StatementCacheSize = 0
+        };
+        var conn = new OracleConnection(builder.ToString());
+        conn.Open();
+        return conn;
+    }
+
+    private void ClearCache()
+    {
+        lock (_lock) { _cache = null; }
+    }
+
+    private Dictionary<string, Cmdb.Services.EntityMeta> DiscoverEntities()
+    {
+        lock (_lock)
+        {
+            if (_cache != null) return _cache;
+        }
+
+        var entities = new Dictionary<string, Cmdb.Services.EntityMeta>(StringComparer.OrdinalIgnoreCase);
+        using var conn = GetConnection();
+
+        var tables = Query(conn, @"
+            SELECT t.TABLE_NAME, c.COMMENTS, 'TABLE' AS OBJECT_TYPE
+            FROM USER_TABLES t
+            LEFT JOIN USER_TAB_COMMENTS c ON c.TABLE_NAME = t.TABLE_NAME
+            UNION ALL
+            SELECT v.VIEW_NAME, c.COMMENTS, 'VIEW' AS OBJECT_TYPE
+            FROM USER_VIEWS v
+            LEFT JOIN USER_TAB_COMMENTS c ON c.TABLE_NAME = v.VIEW_NAME
+            ORDER BY TABLE_NAME");
+
+        foreach (var tbl in tables)
+        {
+            var tableName = tbl["TABLE_NAME"]?.ToString() ?? "";
+            var comment = tbl["COMMENTS"]?.ToString() ?? "";
+            var isView = tbl["OBJECT_TYPE"]?.ToString() == "VIEW";
+            string icon = isView ? "bi-eye" : "bi-table", desc = tableName;
+
+            if (!string.IsNullOrEmpty(comment) && comment.Contains('|'))
+            {
+                var parts = comment.Split('|', 2);
+                icon = parts[0].Trim();
+                desc = parts[1].Trim();
+            }
+
+            var meta = new Cmdb.Services.EntityMeta
+            {
+                TableName = tableName,
+                Icon = icon,
+                Description = desc,
+                DisplayName = SplitPascal(tableName),
+                IsView = isView,
+            };
+
+            meta.Columns = GetColumns(conn, tableName);
+            meta.PkColumns = GetPkColumns(conn, tableName);
+
+            // Views have no PK constraints — use ID column as pseudo-PK if available
+            if (isView && meta.PkColumns.Count == 0)
+            {
+                var idCol = meta.Columns.FirstOrDefault(c =>
+                    c.ColumnName.Equals("ID", StringComparison.OrdinalIgnoreCase));
+                if (idCol != null)
+                    meta.PkColumns.Add(idCol.ColumnName);
+            }
+
+            foreach (var col in meta.Columns)
+            {
+                if (col.ColumnName.EndsWith("_ID", StringComparison.OrdinalIgnoreCase)
+                    && !meta.PkColumns.Contains(col.ColumnName, StringComparer.OrdinalIgnoreCase))
+                {
+                    var refTable = col.ColumnName[..^3];
+                    col.IsFk = true;
+                    col.FkRefTable = refTable;
+                    col.FkRefPk = "ID";
+                    col.FkDisplayCol = GetDisplayColumn(conn, refTable);
+                    col.FkNavName = SplitPascal(refTable);
+                }
+            }
+
+            if (meta.PkColumns.Count > 1)
+                meta.IsCompositePk = true;
+
+            meta.DisplayColumn = GetDisplayColumn(conn, tableName);
+
+            entities[tableName] = meta;
+        }
+
+        lock (_lock) { _cache = entities; }
+        return entities;
+    }
+
+    private List<Cmdb.Services.ColumnMeta> GetColumns(OracleConnection conn, string tableName)
+    {
+        var cols = new List<Cmdb.Services.ColumnMeta>();
+        var rows = Query(conn,
+            "SELECT COLUMN_NAME, DATA_TYPE, DATA_LENGTH, DATA_PRECISION, DATA_SCALE, NULLABLE, DATA_DEFAULT, COLUMN_ID FROM USER_TAB_COLUMNS WHERE TABLE_NAME = :t ORDER BY COLUMN_ID",
+            new OracleParameter("t", tableName.ToUpper()));
+
+        foreach (var r in rows)
+        {
+            var colName = r["COLUMN_NAME"]?.ToString() ?? "";
+            var dataType = r["DATA_TYPE"]?.ToString() ?? "";
+            var nullable = r["NULLABLE"]?.ToString() == "Y";
+            var dataDefault = r["DATA_DEFAULT"]?.ToString()?.Trim() ?? "";
+            bool isIdentity = dataDefault.Contains("ISEQ$$") || dataDefault.Contains("GENERATED");
+
+            cols.Add(new Cmdb.Services.ColumnMeta
+            {
+                ColumnName = colName,
+                DataType = dataType,
+                IsNullable = nullable,
+                IsIdentity = isIdentity,
+            });
+        }
+
+        try
+        {
+            var identRows = Query(conn,
+                "SELECT COLUMN_NAME FROM USER_TAB_IDENTITY_COLS WHERE TABLE_NAME = :t",
+                new OracleParameter("t", tableName.ToUpper()));
+            foreach (var ir in identRows)
+            {
+                var idCol = ir["COLUMN_NAME"]?.ToString() ?? "";
+                var col = cols.FirstOrDefault(c => c.ColumnName.Equals(idCol, StringComparison.OrdinalIgnoreCase));
+                if (col != null) col.IsIdentity = true;
+            }
+        }
+        catch { }
+
+        return cols;
+    }
+
+    private List<string> GetPkColumns(OracleConnection conn, string tableName)
+    {
+        var pks = new List<string>();
+        var rows = Query(conn, @"
+            SELECT cc.COLUMN_NAME
+            FROM USER_CONSTRAINTS c
+            JOIN USER_CONS_COLUMNS cc ON cc.CONSTRAINT_NAME = c.CONSTRAINT_NAME
+            WHERE c.TABLE_NAME = :t AND c.CONSTRAINT_TYPE = 'P'
+            ORDER BY cc.POSITION",
+            new OracleParameter("t", tableName.ToUpper()));
+
+        foreach (var r in rows)
+            pks.Add(r["COLUMN_NAME"]?.ToString() ?? "");
+
+        return pks;
+    }
+
+    private string GetDisplayColumn(OracleConnection conn, string tableName)
+    {
+        var cols = Query(conn,
+            "SELECT COLUMN_NAME, DATA_TYPE FROM USER_TAB_COLUMNS WHERE TABLE_NAME = :t ORDER BY COLUMN_ID",
+            new OracleParameter("t", tableName.ToUpper()));
+
+        var nameCol = cols.FirstOrDefault(c => c["COLUMN_NAME"]?.ToString()?.Equals("NAME", StringComparison.OrdinalIgnoreCase) == true);
+        if (nameCol != null) return nameCol["COLUMN_NAME"]?.ToString() ?? "NAME";
+
+        var varcharCol = cols.FirstOrDefault(c => c["DATA_TYPE"]?.ToString()?.Contains("CHAR") == true);
+        if (varcharCol != null) return varcharCol["COLUMN_NAME"]?.ToString() ?? "";
+
+        return cols.FirstOrDefault()?["COLUMN_NAME"]?.ToString() ?? "ID";
+    }
+
+    private List<Dictionary<string, object?>> Query(OracleConnection conn, string sql, params OracleParameter[] parms)
+    {
+        try
+        {
+            return RunQuery(conn, sql, parms);
+        }
+        catch (OracleException ex) when (ex.Number == 24449)
+        {
+            conn.PurgeStatementCache();
+            return RunQuery(conn, sql, parms);
+        }
+        catch (OracleException ex)
+        {
+            throw new Exception(ex.Message, ex);
+        }
+    }
+
+    private static List<Dictionary<string, object?>> RunQuery(OracleConnection conn, string sql, OracleParameter[] parms)
+    {
+        using var cmd = new OracleCommand(sql, conn);
+        cmd.BindByName = true;
+        foreach (var p in parms) cmd.Parameters.Add(new OracleParameter(p.ParameterName, p.Value));
+        using var rdr = cmd.ExecuteReader();
+        var results = new List<Dictionary<string, object?>>();
+        while (rdr.Read())
+        {
+            var row = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+            for (int i = 0; i < rdr.FieldCount; i++)
+                row[rdr.GetName(i)] = rdr.IsDBNull(i) ? null : rdr.GetValue(i);
+            results.Add(row);
+        }
+        return results;
+    }
+
+    private Dictionary<string, object?>? QueryOne(OracleConnection conn, string sql, params OracleParameter[] parms)
+    {
+        var rows = Query(conn, sql, parms);
+        return rows.Count > 0 ? rows[0] : null;
+    }
+
+    private int Execute(OracleConnection conn, string sql, params OracleParameter[] parms)
+    {
+        try
+        {
+            return RunExecute(conn, sql, parms);
+        }
+        catch (OracleException ex) when (ex.Number == 24449)
+        {
+            conn.PurgeStatementCache();
+            return RunExecute(conn, sql, parms);
+        }
+        catch (OracleException ex)
+        {
+            throw new Exception(ex.Message, ex);
+        }
+    }
+
+    private static int RunExecute(OracleConnection conn, string sql, OracleParameter[] parms)
+    {
+        using var cmd = new OracleCommand(sql, conn);
+        cmd.BindByName = true;
+        foreach (var p in parms) cmd.Parameters.Add(new OracleParameter(p.ParameterName, p.Value));
+        return cmd.ExecuteNonQuery();
+    }
+
+    private object? ExecuteScalar(OracleConnection conn, string sql, params OracleParameter[] parms)
+    {
+        using var cmd = new OracleCommand(sql, conn);
+        cmd.BindByName = true;
+        foreach (var p in parms) cmd.Parameters.Add(p);
+        return cmd.ExecuteScalar();
+    }
+
+    private static string SplitPascal(string name)
+    {
+        name = name.Replace("_", " ");
+        name = System.Text.RegularExpressions.Regex.Replace(name, @"(?<=[a-z])(?=[A-Z])", " ");
+        return System.Globalization.CultureInfo.CurrentCulture.TextInfo.ToTitleCase(name.ToLower());
     }
 }
 
