@@ -1,4 +1,3 @@
-using System.Data;
 using System.Globalization;
 using System.Net;
 using System.Net.Http;
@@ -564,26 +563,9 @@ public class HomeController : Controller
         }
     }
 
-    // GET /entity/{table}/create
-    [HttpGet("/entity/{table}/create")]
-    public IActionResult Create(string table)
-    {
-        var entities = DiscoverEntities();
-        if (!entities.TryGetValue(table, out var entity))
-            return Redirect("/");
-
-        using var conn = GetConnection();
-        var fkOptions = LoadFkOptions(conn, entity);
-
-        ViewBag.Entity = entity;
-        ViewBag.TableName = table.ToUpper();
-        ViewBag.FkOptions = fkOptions;
-        return View("Create");
-    }
-
-    // POST /entity/{table}/create
+    // POST /entity/{table}/create — inserts empty record, opens edit page
     [HttpPost("/entity/{table}/create")]
-    public IActionResult CreatePost(string table)
+    public IActionResult Create(string table)
     {
         var entities = DiscoverEntities();
         if (!entities.TryGetValue(table, out var entity))
@@ -592,54 +574,37 @@ public class HomeController : Controller
         using var conn = GetConnection();
         try
         {
-            var cols = entity.Columns;
             var pkCols = entity.PkColumns;
-            var fields = new List<string>();
-            var placeholders = new List<string>();
-            var parms = new List<OracleParameter>();
-            int idx = 0;
+            var nonIdentityCols = entity.Columns
+                .Where(c => !(pkCols.Contains(c.ColumnName, StringComparer.OrdinalIgnoreCase) && c.IsIdentity))
+                .ToList();
 
-            foreach (var col in cols)
-            {
-                if (pkCols.Contains(col.ColumnName, StringComparer.OrdinalIgnoreCase) && col.IsIdentity)
-                    continue;
+            var fields = nonIdentityCols.Select(c => $"\"{c.ColumnName}\"").ToList();
+            var placeholders = nonIdentityCols.Select(_ => "NULL").ToList();
 
-                var val = Request.Form[col.ColumnName].FirstOrDefault()?.Trim() ?? "";
-                fields.Add($"\"{col.ColumnName}\"");
-                if (string.IsNullOrEmpty(val))
-                {
-                    placeholders.Add("NULL");
-                }
-                else
-                {
-                    var pName = $"p{idx++}";
-                    placeholders.Add($":{pName}");
-                    parms.Add(MakeTypedParam(pName, val, col));
-                }
-            }
-
-            if (pkCols.Count == 1 && cols.First(c => c.ColumnName == pkCols[0]).IsIdentity)
+            if (pkCols.Count == 1 && entity.Columns.First(c => c.ColumnName == pkCols[0]).IsIdentity)
             {
                 var retParm = new OracleParameter("retId", OracleDbType.Decimal, System.Data.ParameterDirection.Output);
-                var sql = $"INSERT INTO \"{table.ToUpper()}\" ({string.Join(", ", fields)}) VALUES ({string.Join(", ", placeholders)}) RETURNING \"{pkCols[0]}\" INTO :retId";
+                var sql = fields.Count > 0
+                    ? $"INSERT INTO \"{table.ToUpper()}\" ({string.Join(", ", fields)}) VALUES ({string.Join(", ", placeholders)}) RETURNING \"{pkCols[0]}\" INTO :retId"
+                    : $"INSERT INTO \"{table.ToUpper()}\" VALUES (DEFAULT) RETURNING \"{pkCols[0]}\" INTO :retId";
                 using var cmd = new OracleCommand(sql, conn);
                 cmd.BindByName = true;
-                foreach (var p in parms) cmd.Parameters.Add(p);
                 cmd.Parameters.Add(retParm);
                 cmd.ExecuteNonQuery();
+                var newId = retParm.Value?.ToString() ?? "";
+                return Redirect($"/entity/{table.ToUpper()}/edit?{pkCols[0]}={Uri.EscapeDataString(newId)}");
             }
             else
             {
-                Execute(conn, $"INSERT INTO \"{table.ToUpper()}\" ({string.Join(", ", fields)}) VALUES ({string.Join(", ", placeholders)})", parms.ToArray());
+                Execute(conn, $"INSERT INTO \"{table.ToUpper()}\" ({string.Join(", ", fields)}) VALUES ({string.Join(", ", placeholders)})");
+                return Redirect($"/entity/{table.ToUpper()}");
             }
-
-            TempData["Flash"] = "success|Record created successfully.";
-            return Redirect($"/entity/{table.ToUpper()}");
         }
         catch (Exception ex)
         {
             TempData["Flash"] = $"danger|Error: {ex.Message}";
-            return Redirect($"/entity/{table.ToUpper()}/create");
+            return Redirect($"/entity/{table.ToUpper()}");
         }
     }
 
@@ -726,56 +691,6 @@ public class HomeController : Controller
             TempData["Flash"] = $"danger|Error: {ex.Message}";
             return Redirect($"/entity/{table.ToUpper()}");
         }
-    }
-
-    // GET /entity/{table}/delete
-    [HttpGet("/entity/{table}/delete")]
-    public IActionResult Delete(string table)
-    {
-        var entities = DiscoverEntities();
-        if (!entities.TryGetValue(table, out var entity))
-            return Redirect("/");
-
-        using var conn = GetConnection();
-        var pkCols = entity.PkColumns;
-        var pkValues = pkCols.ToDictionary(pk => pk, pk => Request.Query[pk].FirstOrDefault() ?? "");
-        var cols = entity.Columns;
-        var fkCols = cols.Where(c => c.IsFk).ToList();
-
-        var selectParts = cols.Select(c => $"\"{table.ToUpper()}\".\"{c.ColumnName}\"").ToList();
-        var joinParts = new List<string>();
-        var fkDisplay = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-
-        foreach (var fk in fkCols)
-        {
-            var alias = "FK_" + fk.ColumnName;
-            var refTable = fk.FkRefTable!.ToUpper();
-            var displayCol = fk.FkDisplayCol ?? "NAME";
-            var navName = fk.FkNavName ?? SplitPascal(fk.FkRefTable!);
-            selectParts.Add($"\"{alias}\".\"{displayCol}\" AS \"{navName}\"");
-            joinParts.Add($"LEFT JOIN \"{refTable}\" \"{alias}\" ON \"{table.ToUpper()}\".\"{fk.ColumnName}\" = \"{alias}\".\"{fk.FkRefPk}\"");
-            fkDisplay[fk.ColumnName] = navName;
-        }
-
-        var whereParts = pkCols.Select((pk, i) => $"\"{table.ToUpper()}\".\"{pk}\" = :pk{i}").ToList();
-        var whereParms = pkCols.Select((pk, i) => new OracleParameter($"pk{i}", pkValues[pk])).ToArray();
-
-        var row = QueryOne(conn,
-            $"SELECT {string.Join(", ", selectParts)} FROM \"{table.ToUpper()}\" {string.Join(" ", joinParts)} WHERE {string.Join(" AND ", whereParts)}",
-            whereParms);
-
-        if (row == null)
-        {
-            TempData["Flash"] = "danger|Record not found.";
-            return Redirect($"/entity/{table.ToUpper()}");
-        }
-
-        ViewBag.Entity = entity;
-        ViewBag.TableName = table.ToUpper();
-        ViewBag.Row = row;
-        ViewBag.FkDisplay = fkDisplay;
-        ViewBag.PkValues = pkValues;
-        return View("Delete");
     }
 
     // POST /entity/{table}/delete
@@ -1254,14 +1169,6 @@ public class HomeController : Controller
         {
             throw new Exception(ex.Message, ex);
         }
-    }
-
-    private object? ExecuteScalar(OracleConnection conn, string sql, params OracleParameter[] parms)
-    {
-        using var cmd = new OracleCommand(sql, conn);
-        cmd.BindByName = true;
-        foreach (var p in parms) cmd.Parameters.Add(p);
-        return cmd.ExecuteScalar();
     }
 
     private static string SplitPascal(string name)
