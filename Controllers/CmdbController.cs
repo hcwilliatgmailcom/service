@@ -1,5 +1,7 @@
 using System.Globalization;
+using System.Net;
 using System.Net.Http;
+using System.Net.Mail;
 using System.Text;
 using System.Text.Json;
 using Cmdb.Services;
@@ -12,15 +14,19 @@ public class CmdbController : Controller
 {
     private readonly SchemaService _schema;
     private readonly IHttpClientFactory _httpFactory;
+    private readonly IConfiguration _config;
     private readonly string? _syncBaseUrl;
     private static readonly Dictionary<string, bool> _syncCache = new(StringComparer.OrdinalIgnoreCase);
     private static readonly object _syncLock = new();
+    private static readonly Dictionary<string, (string Email, DateTime Expiry)> _tokens = new();
+    private static readonly object _tokenLock = new();
     private const int PageSize = 10;
 
     public CmdbController(SchemaService schema, IHttpClientFactory httpFactory, IConfiguration config)
     {
         _schema = schema;
         _httpFactory = httpFactory;
+        _config = config;
         _syncBaseUrl = config["SyncBaseUrl"]?.TrimEnd('/');
     }
 
@@ -28,6 +34,11 @@ public class CmdbController : Controller
     [HttpGet("/")]
     public IActionResult Home()
     {
+        var email = HttpContext.Session.GetString("email");
+        ViewBag.UserEmail = email;
+        if (email == null)
+            return View("Home", new List<EntityMeta>());
+
         _schema.ClearCache();
         var entities = _schema.DiscoverEntities()
             .Values.OrderBy(e => e.DisplayName).ToList();
@@ -62,14 +73,13 @@ public class CmdbController : Controller
             using var conn = _schema.GetConnection();
             _schema.Execute(conn, $"CREATE TABLE \"{name}\" (ID NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY, NAME VARCHAR2(200))");
             ClearAllCaches();
-            TempData["Flash"] = $"success|Table {name} created.";
+            return Redirect($"/entity/{name}");
         }
         catch (Exception ex)
         {
             TempData["Flash"] = $"danger|Error: {ex.Message}";
+            return Redirect("/");
         }
-
-        return Redirect("/schema");
     }
 
     // GET /entity/{table}
@@ -793,12 +803,13 @@ public class CmdbController : Controller
             _schema.Execute(conn, $"DROP TABLE \"{table.ToUpper()}\" CASCADE CONSTRAINTS");
             ClearAllCaches();
             TempData["Flash"] = $"success|Table {table} dropped.";
+            return Redirect("/");
         }
         catch (Exception ex)
         {
             TempData["Flash"] = $"danger|Error: {ex.Message}";
+            return Redirect($"/entity/{table.ToUpper()}");
         }
-        return Redirect("/schema");
     }
 
     // POST /add_column/{table}
@@ -809,6 +820,7 @@ public class CmdbController : Controller
         var colType = Request.Form["column_type"].FirstOrDefault()?.Trim() ?? "VARCHAR2(200)";
         var refTable = Request.Form["ref_table"].FirstOrDefault()?.Trim().ToUpper() ?? "";
         var nullable = Request.Form["nullable"].FirstOrDefault() == "on";
+        var returnUrl = Request.Form["return_url"].FirstOrDefault() ?? "/schema";
 
         // FK reference mode
         if (!string.IsNullOrEmpty(refTable))
@@ -829,13 +841,13 @@ public class CmdbController : Controller
             {
                 TempData["Flash"] = $"danger|Error: {ex.Message}";
             }
-            return Redirect("/schema");
+            return Redirect(returnUrl);
         }
 
         if (string.IsNullOrEmpty(colName))
         {
             TempData["Flash"] = "danger|Column name is required.";
-            return Redirect("/schema");
+            return Redirect(returnUrl);
         }
 
         colName = new string(colName.Where(c => char.IsLetterOrDigit(c) || c == '_').ToArray());
@@ -863,7 +875,7 @@ public class CmdbController : Controller
         {
             TempData["Flash"] = $"danger|Error: {ex.Message}";
         }
-        return Redirect("/schema");
+        return Redirect(returnUrl);
     }
 
     // POST /drop_column/{table}
@@ -1066,6 +1078,96 @@ public class CmdbController : Controller
         }
         result.Add(current.ToString());
         return result;
+    }
+
+    // POST /login
+    [HttpPost("/login")]
+    public async Task<IActionResult> Login()
+    {
+        var email = Request.Form["email"].FirstOrDefault()?.Trim() ?? "";
+        if (string.IsNullOrEmpty(email))
+            return Redirect("/");
+
+        var token = Guid.NewGuid().ToString("N");
+        lock (_tokenLock) { _tokens[token] = (email, DateTime.UtcNow.AddMinutes(15)); }
+
+        var link = $"{Request.Scheme}://{Request.Host}/auth?token={token}";
+        HttpContext.RequestServices.GetRequiredService<ILogger<CmdbController>>()
+            .LogInformation("Magic link for {Email}: {Link}", email, link);
+
+        if (Request.Host.Host is "localhost" or "127.0.0.1" or "::1")
+        {
+            TempData["MagicLink"] = link;
+        }
+        else
+        {
+            try { await SendMagicLinkEmail(email, link); TempData["Flash"] = "success|Check your email for the login link."; }
+            catch (Exception ex)
+            {
+                HttpContext.RequestServices.GetRequiredService<ILogger<CmdbController>>()
+                    .LogError(ex, "Failed to send magic link email to {Email}", email);
+                TempData["Flash"] = "danger|Could not send email. Contact an administrator.";
+            }
+        }
+
+        return Redirect("/");
+    }
+
+    // GET /auth?token=...
+    [HttpGet("/auth")]
+    public IActionResult Auth(string token)
+    {
+        if (string.IsNullOrEmpty(token)) return Redirect("/");
+
+        bool found;
+        (string Email, DateTime Expiry) entry;
+        lock (_tokenLock)
+        {
+            found = _tokens.TryGetValue(token, out entry);
+            if (found) _tokens.Remove(token);
+        }
+
+        if (!found || DateTime.UtcNow > entry.Expiry)
+        {
+            TempData["Flash"] = "danger|This login link is invalid or has expired.";
+            return Redirect("/");
+        }
+
+        HttpContext.Session.SetString("email", entry.Email);
+        return Redirect("/");
+    }
+
+    // GET /logout
+    [HttpGet("/logout")]
+    public IActionResult Logout()
+    {
+        HttpContext.Session.Clear();
+        return Redirect("/");
+    }
+
+    private async Task SendMagicLinkEmail(string to, string link)
+    {
+        var smtp = _config.GetSection("Smtp");
+        var host = smtp["Host"] ?? throw new InvalidOperationException("Smtp:Host not configured");
+        var port = smtp.GetValue("Port", 587);
+        var user = smtp["User"];
+        var pass = smtp["Password"];
+        var from = smtp["From"] ?? user ?? "no-reply@localhost";
+
+        using var client = new SmtpClient(host, port)
+        {
+            EnableSsl = true,
+            Credentials = !string.IsNullOrEmpty(user) ? new NetworkCredential(user, pass) : null
+        };
+
+        using var msg = new MailMessage(from, to)
+        {
+            Subject = "Your CMDB login link",
+            Body = $"<p>Click the link below to sign in to CMDB. This link expires in 15 minutes.</p><p><a href=\"{link}\">{link}</a></p>",
+            IsBodyHtml = true,
+        };
+
+        await client.SendMailAsync(msg);
     }
 }
 

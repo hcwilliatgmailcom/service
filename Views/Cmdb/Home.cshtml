@@ -1,40 +1,83 @@
 @model List<EntityMeta>
 @{
     ViewData["Title"] = "CMDB Dashboard";
+    var loggedIn = ViewBag.UserEmail != null;
+    var magicLink = TempData["MagicLink"] as string;
 }
 <h1 class="mb-4">CMDB Dashboard</h1>
 
+@if (magicLink != null)
+{
+    <div class="alert alert-success">
+        <strong>Your login link:</strong> <a href="@magicLink">@magicLink</a>
+    </div>
+}
+
+@* hidden form for table creation *@
+@if (loggedIn)
+{
+    <form method="post" action="/create_table" id="createForm">
+        <input type="hidden" name="table_name" id="createName"/>
+    </form>
+}
+
+<form method="post" action="/login" id="loginForm">
 <div class="mb-4">
     <div class="input-group input-group-lg">
-        <input type="text" id="entitySearch" class="form-control" placeholder="Search tables..." autofocus/>
+        <input type="text" id="entitySearch" name="email" class="form-control"
+               placeholder="@(loggedIn ? "Search tables..." : "Enter your email to sign in...")" autofocus/>
+        @if (!loggedIn)
+        {
+            <button type="submit" class="btn btn-success">
+                <i class="bi bi-box-arrow-in-right me-1"></i> Login
+            </button>
+        }
+        else
+        {
+            <button type="button" id="createBtn" class="btn btn-danger">
+                <i class="bi bi-plus-circle me-1"></i> Create
+            </button>
+        }
     </div>
 </div>
+</form>
 
-<div class="row row-cols-1 row-cols-md-2 row-cols-lg-3 row-cols-xl-4 g-3" id="entityGrid">
-    @foreach (var e in Model)
-    {
-        <div class="col entity-card" data-name="@e.DisplayName.ToLower()" data-desc="@e.Description.ToLower()">
-            <a href="/entity/@e.TableName" class="text-decoration-none">
-                <div class="card h-100 shadow-sm">
-                    <div class="card-body">
-                        <h5 class="card-title"><i class="bi @e.Icon me-2"></i>@e.DisplayName</h5>
-                        <p class="card-text text-muted small">@e.Description</p>
+@if (loggedIn)
+{
+    <div class="row row-cols-1 row-cols-md-2 row-cols-lg-3 row-cols-xl-4 g-3" id="entityGrid">
+        @foreach (var e in Model)
+        {
+            <div class="col entity-card" data-name="@e.DisplayName.ToLower()" data-desc="@e.Description.ToLower()">
+                <a href="/entity/@e.TableName" class="text-decoration-none">
+                    <div class="card h-100 shadow-sm">
+                        <div class="card-body">
+                            <h5 class="card-title"><i class="bi @e.Icon me-2"></i>@e.DisplayName</h5>
+                            <p class="card-text text-muted small">@e.Description</p>
+                        </div>
                     </div>
-                </div>
-            </a>
-        </div>
-    }
-</div>
-<p id="noResults" class="text-muted text-center mt-4 d-none">No matching entities found.</p>
+                </a>
+            </div>
+        }
+    </div>
+    <p id="noResults" class="text-muted text-center mt-4 d-none">No matching entities found.</p>
+}
 
 @section Scripts {
 <script>
 (function(){
     var input = document.getElementById('entitySearch');
-    var cards = document.querySelectorAll('.entity-card');
+    @if (loggedIn)
+    {
+        <text>
+    var cards     = document.querySelectorAll('.entity-card');
     var noResults = document.getElementById('noResults');
+    var emailRe   = /^[^\s@@]+@@[^\s@@]+\.[^\s@@]+$/;
+    var createBtn = document.getElementById('createBtn');
+    var createForm = document.getElementById('createForm');
+    var createName = document.getElementById('createName');
 
     input.addEventListener('input', function(){
+        if (emailRe.test(this.value.trim())) return;
         var f = this.value.toLowerCase().trim();
         var vis = 0;
         cards.forEach(function(c){
@@ -44,6 +87,28 @@
         });
         noResults.classList.toggle('d-none', vis > 0 || !f);
     });
+
+    input.addEventListener('keydown', function(e){
+        if (e.key !== 'Enter') return;
+        if (emailRe.test(this.value.trim())) { document.getElementById('loginForm').submit(); e.preventDefault(); }
+    });
+
+    createBtn.addEventListener('click', function(){
+        var val = input.value.trim();
+        if (!val) { input.focus(); return; }
+        createName.value = val;
+        createForm.submit();
+    });
+        </text>
+    }
+    else
+    {
+        <text>
+    input.addEventListener('keydown', function(e){
+        if (e.key === 'Enter') { e.preventDefault(); document.getElementById('loginForm').submit(); }
+    });
+        </text>
+    }
 }());
 </script>
 }

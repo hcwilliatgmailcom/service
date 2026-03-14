@@ -44,8 +44,9 @@ app.Use(async (context, next) =>
 app.Use(async (context, next) =>
 {
     var path = context.Request.Path.Value ?? "";
-    var isPublic = path.StartsWith("/login", StringComparison.OrdinalIgnoreCase)
+    var isPublic = path == "/" || path == ""
                 || path.StartsWith("/auth", StringComparison.OrdinalIgnoreCase)
+                || path.StartsWith("/login", StringComparison.OrdinalIgnoreCase)
                 || path.StartsWith("/api/", StringComparison.OrdinalIgnoreCase);
 
     if (!isPublic && context.Session.GetString("email") == null)

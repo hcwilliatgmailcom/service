@@ -31,14 +31,19 @@
                 <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navContent">
                     <span class="navbar-toggler-icon"></span>
                 </button>
+                @{var navEmail = Context.Session.GetString("email");}
                 <div class="collapse navbar-collapse" id="navContent">
-                    <ul class="navbar-nav flex-grow-1">
-                        <li class="nav-item"><a class="nav-link text-dark" href="/">Home</a></li>
-                        <li class="nav-item"><a class="nav-link text-dark" href="/schema">Schema</a></li>
-                    </ul>
-                    <ul class="navbar-nav ms-auto">
-                        <li class="nav-item"><a class="nav-link text-dark" href="/logout">Sign out</a></li>
-                    </ul>
+                    @if (navEmail != null)
+                    {
+                        <ul class="navbar-nav flex-grow-1">
+                            <li class="nav-item"><a class="nav-link text-dark" href="/">Home</a></li>
+                            <li class="nav-item"><a class="nav-link text-dark" href="/schema">Schema</a></li>
+                        </ul>
+                        <ul class="navbar-nav ms-auto">
+                            <li class="nav-item"><span class="nav-link text-muted small">@navEmail</span></li>
+                            <li class="nav-item"><a class="nav-link text-dark" href="/logout">Sign out</a></li>
+                        </ul>
+                    }
                 </div>
             </div>
         </nav>
