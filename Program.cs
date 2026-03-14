@@ -24,7 +24,7 @@ app.UseStaticFiles();
 app.UseRouting();
 app.UseSession();
 
-// Global error handler: catch unhandled exceptions, show them as a flash message
+// Global error handler
 app.Use(async (context, next) =>
 {
     try
@@ -33,14 +33,31 @@ app.Use(async (context, next) =>
     }
     catch (Exception ex)
     {
+        if (context.Response.HasStarted) return;
         var msg = ex.InnerException?.Message ?? ex.Message;
-        context.Session.SetString("_flash", $"danger|Error: {msg}");
-        var referer = context.Request.Headers["Referer"].FirstOrDefault() ?? "/";
-        context.Response.Redirect(referer);
+        var current = context.Request.Path.Value ?? "/";
+        var referer = context.Request.Headers["Referer"].FirstOrDefault() ?? "";
+
+        // Pick a safe redirect target that is not the current page
+        var target = (!string.IsNullOrEmpty(referer) && !referer.Contains(current)) ? referer : null;
+
+        try { context.Session.SetString("_flash", $"danger|Error: {msg}"); } catch { }
+
+        if (target != null)
+        {
+            context.Response.Redirect(target);
+        }
+        else
+        {
+            // Cannot redirect safely — write error inline
+            context.Response.StatusCode = 500;
+            context.Response.ContentType = "text/html";
+            await context.Response.WriteAsync($"<div style='font-family:sans-serif;padding:2em;color:red'><b>Error:</b> {System.Net.WebUtility.HtmlEncode(msg)}</div>");
+        }
     }
 });
 
-// Auth guard: redirect to /login unless the session has an email or the path is /login or /auth
+// Auth guard
 app.Use(async (context, next) =>
 {
     var path = context.Request.Path.Value ?? "";
@@ -49,10 +66,15 @@ app.Use(async (context, next) =>
                 || path.StartsWith("/login", StringComparison.OrdinalIgnoreCase)
                 || path.StartsWith("/api/", StringComparison.OrdinalIgnoreCase);
 
-    if (!isPublic && context.Session.GetString("email") == null)
+    if (!isPublic)
     {
-        context.Response.Redirect("/login");
-        return;
+        string? email = null;
+        try { email = context.Session.GetString("email"); } catch { }
+        if (email == null)
+        {
+            context.Response.Redirect("/");
+            return;
+        }
     }
 
     await next();

@@ -10,7 +10,7 @@ using Oracle.ManagedDataAccess.Client;
 
 namespace Cmdb.Controllers;
 
-public class CmdbController : Controller
+public class HomeController : Controller
 {
     private readonly SchemaService _schema;
     private readonly IHttpClientFactory _httpFactory;
@@ -22,7 +22,7 @@ public class CmdbController : Controller
     private static readonly object _tokenLock = new();
     private const int PageSize = 10;
 
-    public CmdbController(SchemaService schema, IHttpClientFactory httpFactory, IConfiguration config)
+    public HomeController(SchemaService schema, IHttpClientFactory httpFactory, IConfiguration config)
     {
         _schema = schema;
         _httpFactory = httpFactory;
@@ -39,10 +39,18 @@ public class CmdbController : Controller
         if (email == null)
             return View("Home", new List<EntityMeta>());
 
-        _schema.ClearCache();
-        var entities = _schema.DiscoverEntities()
-            .Values.OrderBy(e => e.DisplayName).ToList();
-        return View("Home", entities);
+        try
+        {
+            _schema.ClearCache();
+            var entities = _schema.DiscoverEntities()
+                .Values.OrderBy(e => e.DisplayName).ToList();
+            return View("Home", entities);
+        }
+        catch (Exception ex)
+        {
+            TempData["Flash"] = $"danger|Error loading entities: {ex.Message}";
+            return View("Home", new List<EntityMeta>());
+        }
     }
 
     // GET /schema
@@ -1092,7 +1100,7 @@ public class CmdbController : Controller
         lock (_tokenLock) { _tokens[token] = (email, DateTime.UtcNow.AddMinutes(15)); }
 
         var link = $"{Request.Scheme}://{Request.Host}/auth?token={token}";
-        HttpContext.RequestServices.GetRequiredService<ILogger<CmdbController>>()
+        HttpContext.RequestServices.GetRequiredService<ILogger<HomeController>>()
             .LogInformation("Magic link for {Email}: {Link}", email, link);
 
         if (Request.Host.Host is "localhost" or "127.0.0.1" or "::1")
@@ -1104,7 +1112,7 @@ public class CmdbController : Controller
             try { await SendMagicLinkEmail(email, link); TempData["Flash"] = "success|Check your email for the login link."; }
             catch (Exception ex)
             {
-                HttpContext.RequestServices.GetRequiredService<ILogger<CmdbController>>()
+                HttpContext.RequestServices.GetRequiredService<ILogger<HomeController>>()
                     .LogError(ex, "Failed to send magic link email to {Email}", email);
                 TempData["Flash"] = "danger|Could not send email. Contact an administrator.";
             }
