@@ -23,8 +23,7 @@
 
     @* Forms defined outside the table to avoid invalid nested form HTML *@
     <form id="add-col-@tableName" method="post" action="/add_column/@tableName"></form>
-    <form id="drop-tbl-@tableName" method="post" action="/drop_table/@tableName"
-          onsubmit="return confirm('Drop table @tableName?');"></form>
+    <form id="drop-tbl-@tableName" method="post" action="/drop_table/@tableName"></form>
 
     foreach (var col in entity.Columns)
     {

@@ -17,8 +17,7 @@
 
 @if (!entity.IsView)
 {
-    <form id="dropTableForm" method="post" action="/drop_table/@tableName"
-          onsubmit="return confirm('Drop table @tableName? This cannot be undone.');"></form>
+    <form id="dropTableForm" method="post" action="/drop_table/@tableName"></form>
 }
 <form method="get" action="/entity/@tableName" class="mb-3">
     <div class="input-group">
