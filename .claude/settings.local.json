@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(powershell.exe -Command \"Stop-Process -Id 29376 -Force -ErrorAction SilentlyContinue; Write-Host 'done'\")"
+    ]
+  }
+}
